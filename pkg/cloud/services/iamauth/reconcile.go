@@ -34,7 +34,10 @@ import (
 
 // ReconcileIAMAuthenticator is used to create the aws-iam-authenticator in a cluster.
 func (s *Service) ReconcileIAMAuthenticator(ctx context.Context) error {
-	s.scope.Info("Reconciling aws-iam-authenticator configuration", "cluster", klog.KRef(s.scope.Namespace(), s.scope.Name()))
+	s.scope.Info(
+		"Reconciling aws-iam-authenticator configuration",
+		"cluster", klog.KRef(s.scope.Namespace(), s.scope.Name()),
+	)
 
 	remoteClient, err := s.scope.RemoteClient()
 	if err != nil {
@@ -46,43 +49,47 @@ func (s *Service) ReconcileIAMAuthenticator(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("getting aws-iam-authenticator backend: %w", err)
 	}
+
+	// Discover node roles from worker templates.
 	nodeRoles, err := s.getRolesForWorkers(ctx)
 	if err != nil {
 		s.scope.Error(err, "getting roles for remote workers")
 		return fmt.Errorf("getting roles for remote workers: %w", err)
 	}
+
+	iamCfg := s.scope.IAMAuthConfig()
+
+	// Compose the desired role set: node roles ∪ iamCfg.RoleMappings.
+	// Node roles MUST be included — the reconcile is a full replace of the
+	// aws-auth backend, so omitting them would revoke kubelet auth on all
+	// worker nodes.
+	desiredRoles := make([]ekscontrolplanev1.RoleMapping, 0, len(nodeRoles)+len(iamCfg.RoleMappings))
 	for roleName := range nodeRoles {
 		roleARN, err := s.getARNForRole(ctx, roleName)
 		if err != nil {
 			return fmt.Errorf("failed to get ARN for role %s: %w", roleName, err)
 		}
-		nodesRoleMapping := ekscontrolplanev1.RoleMapping{
+		desiredRoles = append(desiredRoles, ekscontrolplanev1.RoleMapping{
 			RoleARN: roleARN,
 			KubernetesMapping: ekscontrolplanev1.KubernetesMapping{
 				UserName: EC2NodeUserName,
 				Groups:   NodeGroups,
 			},
-		}
-		s.scope.Debug("Mapping node IAM role", "iam-role", nodesRoleMapping.RoleARN, "user", nodesRoleMapping.UserName)
-		if err := authBackend.MapRole(nodesRoleMapping); err != nil {
-			return fmt.Errorf("mapping iam node role: %w", err)
-		}
+		})
 	}
+	desiredRoles = append(desiredRoles, iamCfg.RoleMappings...)
 
-	s.scope.Debug("Mapping additional IAM roles and users")
-	iamCfg := s.scope.IAMAuthConfig()
-	for _, roleMapping := range iamCfg.RoleMappings {
-		s.scope.Debug("Mapping IAM role", "iam-role", roleMapping.RoleARN, "user", roleMapping.UserName)
-		if err := authBackend.MapRole(roleMapping); err != nil {
-			return fmt.Errorf("mapping iam role: %w", err)
-		}
-	}
+	desiredUsers := iamCfg.UserMappings
 
-	for _, userMapping := range iamCfg.UserMappings {
-		s.scope.Debug("Mapping IAM user", "iam-user", userMapping.UserARN, "user", userMapping.UserName)
-		if err := authBackend.MapUser(userMapping); err != nil {
-			return fmt.Errorf("mapping iam user: %w", err)
-		}
+	s.scope.Debug(
+		"Reconciling IAM authenticator mappings",
+		"node-roles", len(nodeRoles),
+		"user-roles", len(iamCfg.RoleMappings),
+		"user-mappings", len(desiredUsers),
+	)
+
+	if err := authBackend.ReconcileMappings(desiredRoles, desiredUsers); err != nil {
+		return fmt.Errorf("reconciling iam mappings: %w", err)
 	}
 
 	s.scope.Info("Reconciled aws-iam-authenticator configuration", "cluster", klog.KRef("", s.scope.Name()))
