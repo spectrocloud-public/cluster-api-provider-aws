@@ -137,12 +137,15 @@ func (b *crdBackend) ReconcileMappings(
 
 	ctx := context.TODO()
 
-	// CAPA only creates IAMIdentityMapping CRs in kube-system; scope the list
-	// to that namespace so out-of-band CRs elsewhere (even if they happen to
-	// carry the capa-iamauth- GenerateName prefix) are never considered for
-	// deletion and the list size stays bounded.
+	// Note: IAMIdentityMapping is cluster-scoped (`+genclient:nonNamespaced`
+	// in aws-iam-authenticator; `scope: Cluster` in the CRD). Do not add an
+	// InNamespace(kube-system) selector here — on a real cluster the API
+	// server strips the Namespace field, so a namespaced List returns zero
+	// items even though the code below sets Namespace on Create (a harmless
+	// no-op on real clusters; the controller-runtime fake client preserves
+	// the field, which is why the tests would pass under either variant).
 	mappingList := iamauthv1.IAMIdentityMappingList{}
-	if err := b.client.List(ctx, &mappingList, crclient.InNamespace(metav1.NamespaceSystem)); err != nil {
+	if err := b.client.List(ctx, &mappingList); err != nil {
 		return fmt.Errorf("listing IAMIdentityMappings: %w", err)
 	}
 
