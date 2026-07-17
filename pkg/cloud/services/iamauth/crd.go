@@ -137,8 +137,12 @@ func (b *crdBackend) ReconcileMappings(
 
 	ctx := context.TODO()
 
+	// CAPA only creates IAMIdentityMapping CRs in kube-system; scope the list
+	// to that namespace so out-of-band CRs elsewhere (even if they happen to
+	// carry the capa-iamauth- GenerateName prefix) are never considered for
+	// deletion and the list size stays bounded.
 	mappingList := iamauthv1.IAMIdentityMappingList{}
-	if err := b.client.List(ctx, &mappingList); err != nil {
+	if err := b.client.List(ctx, &mappingList, crclient.InNamespace(metav1.NamespaceSystem)); err != nil {
 		return fmt.Errorf("listing IAMIdentityMappings: %w", err)
 	}
 

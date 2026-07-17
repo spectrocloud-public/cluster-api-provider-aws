@@ -19,6 +19,7 @@ package iamauth
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -79,7 +80,14 @@ func (s *Service) ReconcileIAMAuthenticator(ctx context.Context) error {
 	}
 	desiredRoles = append(desiredRoles, iamCfg.RoleMappings...)
 
-	desiredUsers := iamCfg.UserMappings
+	// Dedup by ARN and sort deterministically. nodeRoles is a map (unordered)
+	// and a user-configured RoleMapping may collide with a discovered node
+	// role's ARN; without dedup+sort the CM backend would churn the aws-auth
+	// ConfigMap on every reconcile and the CRD backend would create duplicate
+	// IAMIdentityMapping CRs. User-configured mappings are appended after node
+	// roles so they win on ARN collision (explicit intent overrides discovery).
+	desiredRoles = dedupAndSortRoles(desiredRoles)
+	desiredUsers := dedupAndSortUsers(iamCfg.UserMappings)
 
 	s.scope.Debug(
 		"Reconciling IAM authenticator mappings",
@@ -92,7 +100,7 @@ func (s *Service) ReconcileIAMAuthenticator(ctx context.Context) error {
 		return fmt.Errorf("reconciling iam mappings: %w", err)
 	}
 
-	s.scope.Info("Reconciled aws-iam-authenticator configuration", "cluster", klog.KRef("", s.scope.Name()))
+	s.scope.Info("Reconciled aws-iam-authenticator configuration", "cluster", klog.KRef(s.scope.Namespace(), s.scope.Name()))
 
 	return nil
 }
@@ -215,4 +223,37 @@ func (s *Service) getRolesForAWSManagedMachinePool(ctx context.Context, ref clus
 		allRoles[instanceProfile] = struct{}{}
 	}
 	return nil
+}
+
+// dedupAndSortRoles collapses RoleMapping entries with duplicate RoleARNs and
+// returns the result sorted by RoleARN. Later entries win on collision, which
+// makes user-configured mappings from iamCfg.RoleMappings override any
+// same-ARN entry that came from node-role discovery.
+func dedupAndSortRoles(in []ekscontrolplanev1.RoleMapping) []ekscontrolplanev1.RoleMapping {
+	byARN := make(map[string]ekscontrolplanev1.RoleMapping, len(in))
+	for _, m := range in {
+		byARN[m.RoleARN] = m
+	}
+	out := make([]ekscontrolplanev1.RoleMapping, 0, len(byARN))
+	for _, m := range byARN {
+		out = append(out, m)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].RoleARN < out[j].RoleARN })
+	return out
+}
+
+// dedupAndSortUsers is the UserMapping analog of dedupAndSortRoles. It
+// collapses duplicate UserARNs (later wins) and returns entries sorted by
+// UserARN.
+func dedupAndSortUsers(in []ekscontrolplanev1.UserMapping) []ekscontrolplanev1.UserMapping {
+	byARN := make(map[string]ekscontrolplanev1.UserMapping, len(in))
+	for _, m := range in {
+		byARN[m.UserARN] = m
+	}
+	out := make([]ekscontrolplanev1.UserMapping, 0, len(byARN))
+	for _, m := range byARN {
+		out = append(out, m)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UserARN < out[j].UserARN })
+	return out
 }
