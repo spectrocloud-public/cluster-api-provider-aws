@@ -1,0 +1,201 @@
+# ── INPUT (Gate-1, you edit) — SHAs to force-pick as PICK-RESOLVE (3-way-merged at execute). One per line; '#' = comment. See ../README.md ──
+#
+# reviewer-applied: round-2 convergence 2026-07-10 (adversarial audit vs v2.12.1 tree)
+#
+# ─── MIXED "Added Spectro Manifests" seed ─────────────────────────────────────
+# 24c392cf — MIXED seed: fork's spectro/base/, spectro/global/, spectro/run.sh are
+#            fork-local kustomize inputs that must survive (target v2.12.1 has no
+#            spectro/ dir at all); the generated spectro/generated/core-*.yaml is
+#            re-derived by running spectro/run.sh post-execute. Resolver 3-way-merges
+#            fork intent (full spectro/ tree) vs target (no spectro/) → adds the dir.
+#            Patch F note: palette-side config/vendorcrd/aws is separately regen'd
+#            by vendorcrd-sync at integration — orthogonal to this commit.
+24c392cf
+#
+# ─── main.go webhook-split canonical commit ───────────────────────────────────
+# f8164af5 — "Configure webhooks to run without a service account" (2025-12-19) is
+#            the LATEST + canonical webhook-split change. Earlier iterations
+#            (c065115f, 3fcd9f70, 5a5028f5, 738315d9, 5f8cab0c) are SKIP'd
+#            (see skip-commits.txt). Resolver's 3-way merge should bring in the
+#            fork's current main.go webhookPort=0 split machinery (Patch D: fork
+#            intent vs target vs upstream). If resolver leaves markers, execute
+#            surfaces NEEDS-HUMAN — human triages at Gate 2. See regwatch-risk.tsv.
+f8164af5
+#
+# ─── EKS OIDC hotspot (6 distinct surviving fork behaviors) ───────────────────
+# All 6 fork commits below contribute distinct surviving behavior to the current
+# oidc.go / iam.go. Each is a separate bug/feature fix, not just refactor iterations
+# of the same change. Verified via grep of fork's current pkg/cloud/services/eks/
+# for: getOIDCProviderARN, reconcileTrustPolicy, OIDCProviderARNAnnotation,
+# buildOIDCTrustPolicy, isTrustPolicyConfigMapPresent.
+#
+# d622c517 — Fixed OIDC deletion issue for private EKS cluster (iam.go +getOIDCProviderARN)
+d622c517
+# b3ff89fb — Fixed trust policy reconcile issue (oidc.go +reconcileTrustPolicy call)
+b3ff89fb
+# 6b3026e7 — PCP-1561 OIDC providers cleanup on cluster deprovision (session.go + oidc.go)
+6b3026e7
+# 8f4b217b — PCP-2735 EKS deletion stuck (OidcProviderArnAnnotation constant + annotation-based ARN lookup)
+8f4b217b
+# 5fbe28d0 — code refactor: rename to OIDCProviderARNAnnotation + update usages (survives to canonical name)
+5fbe28d0
+# 246109f2 — trust policy configmap early exit check (small but survives)
+246109f2
+#
+# ─── Ignition security fix on relocated webhook ───────────────────────────────
+# 69989b99 — PCP-6085 v1beta2 ignition-version validation (bump DefaultIgnitionVersion
+#            to "3.4" + reject non-3.x via semver.ParseTolerant). Fork patches
+#            api/v1beta2/awsmachine_webhook.go, but target v2.12.1 MOVED the webhook
+#            to webhooks/awsmachine_webhook.go (structural upstream change). Resolver
+#            must 3-way-merge fork's security fix onto the RELOCATED file. Also
+#            bumps DefaultIgnitionVersion in api/v1beta2/awsmachine_types.go which
+#            target still has at "2.3". HIGH risk (see regwatch) — human confirm.
+69989b99
+#
+# ─── spectro/run.sh fix + regenerated content ─────────────────────────────────
+# b687c16d — "spectro run script fix": 4-line real fork change to spectro/run.sh
+#            (+ 12000/8000 lines of regenerated spectro/generated/core-*.yaml).
+#            The run.sh fix is real fork code that must survive; the generated
+#            content is re-derivable by executing spectro/run.sh post-execute.
+#            Resolver may struggle with the large generated diffs — human confirms
+#            post-execute regeneration.
+b687c16d
+
+# ═════════════════════════════════════════════════════════════════════════════
+# reviewer-applied round 3 (2026-07-10 — FINAL) — by-file batch triage
+# For each ND commit: read fork current file → check if intent survives → check
+# if target already covers → RESOLVE (survives, target lacks) / SKIP (superseded
+# or target has equivalent). All decisions include line-level evidence.
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ─── AL2023 userdata / nodeadm (per human directive after user pushback) ──────
+# 3531eda5 — "Code refactor" AL2023 userdata in bootstrap/eks/internal/userdata/node.go
+#            (+268 lines: AMIFamilyAL2/AL2023 consts, mimeHeaderTemplate,
+#             shellScriptPartTemplate, nodeConfigPartTemplate). Target v2.12.1 has
+#             NODEADM at bootstrap/eks/internal/userdata/nodeadm.go (from upstream commit
+#             1661d9761 "feat: adds nodeadm type"; same MIME boundary "//"; imports
+#             only eksbootstrapv1). OVERLAP is real but not full replacement: fork's
+#             node.go handles AL2023 INLINE with additional args/commands not in target's
+#             nodeadm.go. Resolver 3-way-merges — MUST review at Gate 2 for duplicate
+#             bootstrap paths / conflicting AL2023 codepaths.
+#             Was PICK-VERIFY; user moved to RESOLVE.
+# 76019cee — EKSConfig LaunchTemplate bootstrap for AL2023 using nodeadm
+#            (+util/paused/, +bootstrap/eks/controllers/eksconfig_controller.go +157).
+#            util/paused/ IS in target v2.12.1 (upstreamed independently) — so
+#            fork's paused/ additions are at least partly redundant. Fork's
+#            eksconfig_controller.go integration remains fork-specific. RESOLVE
+#            with human-noted overlap: resolver output MUST be reviewed at Gate 2
+#            for duplicate paused-condition handling.
+76019cee
+
+# ─── bootstrap/eks/controllers/eksconfig_controller.go (4 fork commits, all survive) ──
+# c9ad0d74 — PCP-4952 STS/kubeconfig-based CA fetch (verified: fork current has
+#            extractCAFromSecret L356, kubeconfigutil.FromSecret L610); replaces
+#            direct AWS session-based fetch with in-cluster kubeconfig fetch.
+#            Target v2.12.1 does NOT have this; real fork behavior.
+c9ad0d74
+# a2477966 — PCP-5325 secret region: uses controlPlane.Status.Ready instead of
+#            EKSControlPlaneReadyCondition — small refactor, survives.
+a2477966
+# b9f3f86a — PCP-5517 clustercidr/dns NodeInput: adds getClusterCidr() function
+#            (verified: fork current has L291 usage + L634 fallback). Target
+#            v2.12.1 does NOT have this function.
+b9f3f86a
+# bd7bc897 — PEM-10055 sequoia-emulator handling + transformEndpointForSecretRegion
+#            (verified: fork current has isEmulator L314-, transformEndpointForSecretRegion
+#            L335). Target does NOT have this. Real fork behavior. Also touches
+#            go.mod/hack/tools go.mod but the CVE gate will handle dep drift.
+bd7bc897
+
+# ─── pkg/cloud/services/eks/config.go (2 fork commits, both survive) ──────────
+# 7226c861 — PCP-259 EKS upgrade post-issues: adds updateUserKubeconfigSecret
+#            (verified: fork current L275). Target v2.12.1 doesn't have it.
+7226c861
+# f108d78c — return correct errors (variable-shadowing fix); tiny 4-line change,
+#            survives to fork current.
+f108d78c
+
+# ─── pkg/cloud/services/eks/nodegroup.go (3 fork commits survive; c3dfe72b is
+#     superseded — see skip-commits.txt) ────────────────────────────────────────
+# 4b21d29a — log degraded state: adds case eks.NodegroupStatusDegraded handler
+#            (verified fork current L679). Touches config.go L273 (V(2).Info→Trace).
+#            Target v2.12.1 doesn't have the degraded logging.
+4b21d29a
+# e6d443e2 — Do not set amiType if EKSOptimizedLookupType (verified fork current
+#            L239-242: ltHasCustomAMI check with EKSOptimizedLookupType). Target
+#            v2.12.1 L228 still uses older AMI.ID == nil check.
+e6d443e2
+# 5ba61538 — PCP-6865 bypass nodegroup version API for custom AMI (verified fork
+#            current: ngIsCustomAMI L416, versionUpgradeNeeded L417). Target
+#            doesn't have this — 100k+ failure event loop is a real fork-only fix.
+5ba61538
+
+# ─── exp/controllers/awsmanagedmachinepool_controller.go (1 survives, 1 SKIP) ──
+# 1a891780 — nil pointer launchTemplateID with Private Endpoint fallback (verified
+#            fork current L274: launchTemplateID from Status; L290 GetLaunchTemplateID
+#            fallback when nil). Supersedes 52817669 (see skip-commits.txt).
+1a891780
+
+# ─── pkg/cloud/services/eks/oidc.go PCP-4486 IRSA ─────────────────────────────
+# 46d56391 — PCP-4486 EKS IRSA support (isTrustPolicyConfigMapPresent function,
+#            + resolver_endpoint.go log-level change). Verified fork current
+#            oidc.go L127 has the function. Target doesn't.
+46d56391
+
+# ─── pkg/cloud/services/eks/securitygroup.go PCP-3571 SG tag updation ─────────
+# 2c331b16 — PCP-3571 EKS SG tag updation from AWSManagedControlPlane. Adds
+#            updateTagsForEKSManagedSecurityGroup + desiredTags helpers (verified
+#            fork current: securitygroup.go L87-121 uses these). Target lacks.
+2c331b16
+
+# ─── pkg/cloud/services/eks/tags.go skip aws:-prefixed tags ───────────────────
+# f73e9bb3 — eks: skip aws:-prefixed tags in nodegroup reconciliation.
+#            Uses tags.AwsInternalTagPrefix (verified fork current: tags.go L71).
+#            Also cleans up temporary variables via ptr.To(). Fork-only behavior.
+f73e9bb3
+
+# ─── pkg/cloud/scope/session.go PCP-1428 FIPS endpoints ───────────────────────
+# 0b29ddfe — PCP-1428 AWS FIPS endpoints support. Adds pkg/utils/resolver_endpoint.go
+#            (+149 lines, fork-only new file — verified fork current has it).
+#            Session.go now uses CustomEndpointResolverForAWS (L90, L127).
+0b29ddfe
+
+# ─── pkg/eks/addons/types.go Fix addons comparison ────────────────────────────
+# 4d05d66e — Fix addons comparison (verified fork current: types_test.go L109,
+#            L122 has the corrected test cases). Semantic fix on EKSAddon equality.
+4d05d66e
+
+# ─── api/v1beta2/awsmachine_webhook.go BET-4653 (relocated in target — H risk) ─
+# f40fb74d — Fix BET-4653: enhanced error message + RootVolume.DeviceName reset
+#            for non-ignition machines. Fork patches api/v1beta2/awsmachine_webhook.go
+#            but target v2.12.1 RELOCATED the file to webhooks/awsmachine_webhook.go
+#            (same file-relocation issue as 69989b99). Resolver must map fork's
+#            changes onto the relocated file — HIGH risk (see regwatch).
+f40fb74d
+
+# ─── bootstrap/eks tests + conversion.go (NodeType conversion) ────────────────
+# e1705b54 — added tests: extends conversion.go with NodeType round-trip (verified
+#            fork current conversion.go L40-41, L110-111). NodeType field is added
+#            by 76019cee's AL2023 support; e1705b54 is the conversion follow-up.
+e1705b54
+
+# ─── MIXED commits (generated + code) — resolver handles the split ────────────
+# These MIXED commits blend fork-only code changes with generated content updates.
+# The engine currently emits NEEDS-DECISION for MIXED even when in resolve-commits.txt
+# (engine treats MIXED differently from F4 conflicts) — recommend the human confirm
+# via known-commits.tsv override too. All add substantial fork functionality NOT
+# in target v2.12.1 (see regwatch entries with line-level evidence).
+#
+# fb2387a1 — PEM-4967 TopSecret region: permissions_boundary.go, iam.go, roles.go,
+#            credentials.yaml — HIGH-risk fork feature not in v2.12.1.
+fb2387a1
+# 89907a44 — PCP-5519 HostResourceGroup: v1beta2 API additions confirmed not in target.
+89907a44
+# 91dcb84e — BYO launch template for EKS managed node groups: webhook+tests +
+#            IsBYOLaunchTemplate helper used by 1a891780's guard (verified fork
+#            current controller L273 uses !IsBYOLaunchTemplate()).
+91dcb84e
+# 2b801f8a — AMI type lookup: touches api/v1beta2/types.go + eksconfig_controller.go
+#            + generated CRDs. Related to AL2023 support family.
+2b801f8a
+
