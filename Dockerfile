@@ -17,7 +17,7 @@
 # Build the manager binary
 ARG BUILDER_GOLANG_VERSION
 # First stage: build the executable.
-FROM us-docker.pkg.dev/palette-images/build-base-images/golang:${BUILDER_GOLANG_VERSION}-alpine as toolchain
+FROM us-central1-docker.pkg.dev/palette-images-dev/hardened-images/builder/golang:${BUILDER_GOLANG_VERSION}-alpine as toolchain
 # Ensure Go downloads the toolchain declared in go.mod even if base image go < go.mod directive
 ENV GOTOOLCHAIN=auto
 # Run this with docker build --build_arg $(go env GOPROXY) to override the goproxy
