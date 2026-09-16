@@ -17928,10 +17928,10 @@ spec:
           name: cert
           readOnly: true
       securityContext:
-        fsGroup: 1000
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      serviceAccountName: manager
       terminationGracePeriodSeconds: 10
       tolerations:
       - effect: NoSchedule

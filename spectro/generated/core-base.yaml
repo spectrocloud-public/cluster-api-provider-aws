@@ -96,6 +96,14 @@ rules:
   - list
   - watch
 - apiGroups:
+  - apiextensions.k8s.io
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - authentication.k8s.io
   resources:
   - tokenreviews
@@ -131,8 +139,8 @@ rules:
   - clusters
   - clusters/status
   - machinedeployments
-  - machines
   - machines/status
+  - machinesets
   verbs:
   - get
   - list
@@ -143,9 +151,19 @@ rules:
   - machinepools
   - machinepools/status
   verbs:
+  - create
   - get
   - list
   - patch
+  - watch
+- apiGroups:
+  - cluster.x-k8s.io
+  resources:
+  - machines
+  verbs:
+  - delete
+  - get
+  - list
   - watch
 - apiGroups:
   - controlplane.cluster.x-k8s.io
@@ -170,6 +188,13 @@ rules:
 - apiGroups:
   - controlplane.cluster.x-k8s.io
   resources:
+  - awsmanagedcontrolplanes/finalizers
+  - rosacontrolplanes/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - controlplane.cluster.x-k8s.io
+  resources:
   - awsmanagedcontrolplanes/status
   - rosacontrolplanes/status
   verbs:
@@ -178,12 +203,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - controlplane.cluster.x-k8s.io
-  resources:
-  - rosacontrolplanes/finalizers
-  verbs:
-  - update
 - apiGroups:
   - infrastructure.cluster.x-k8s.io
   resources:
@@ -209,11 +228,9 @@ rules:
   - awsclusters
   - awsfargateprofiles
   - awsmachinepools
-  - awsmachines
   - awsmanagedclusters
   - awsmanagedmachinepools
   - rosaclusters
-  - rosamachinepools
   verbs:
   - delete
   - get
@@ -226,11 +243,20 @@ rules:
   resources:
   - awsclusters/status
   - awsfargateprofiles/status
+  - awsmachinetemplates/status
   - rosaclusters/status
-  - rosamachinepools/status
+  - rosanetworks/status
+  - rosaroleconfigs/status
   verbs:
   - get
   - patch
+  - update
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - awsmachinepools/finalizers
+  verbs:
+  - delete
   - update
 - apiGroups:
   - infrastructure.cluster.x-k8s.io
@@ -248,9 +274,37 @@ rules:
 - apiGroups:
   - infrastructure.cluster.x-k8s.io
   resources:
+  - awsmachines
+  - rosamachinepools
+  - rosanetworks
+  - rosaroleconfigs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
   - rosamachinepools/finalizers
+  - rosanetworks/finalizers
+  - rosaroleconfigs/finalizers
   verbs:
   - update
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - rosamachinepools/status
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -373,6 +427,7 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      serviceAccountName: capa-controller-manager
       terminationGracePeriodSeconds: 10
       tolerations:
       - effect: NoSchedule

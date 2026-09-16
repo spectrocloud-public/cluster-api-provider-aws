@@ -14,7 +14,6 @@ bases:
   - ../../config/webhook
 
 patchesStrategicMerge:
-  - ../../config/default/manager_service_account_patch.yaml
   - ../../config/default/manager_pull_policy.yaml
   - ../../config/default/manager_webhook_patch.yaml
   - ../../config/default/webhookcainjection_patch.yaml
@@ -50,12 +49,3 @@ vars:
       kind: Service
       version: v1
       name: webhook-service
-
-patchesJson6902:
-- target:
-    group: apps
-    kind: Deployment
-    name: controller-manager
-    namespace: system
-    version: v1
-  path: patch_service_account.yaml
