@@ -122,6 +122,10 @@ func (s *NodegroupService) reconcileASGTags(ng *eks.Nodegroup) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to describe ASG for nodegroup")
 	}
+	if asg == nil {
+		s.scope.Debug("ASG not found for nodegroup, skipping tag reconciliation", "nodegroup-name", *ng.NodegroupName)
+		return nil
+	}
 
 	tagsToDelete, tagsToAdd := getASGTagUpdates(s.scope.ClusterName(), tagDescriptionsToMap(asg.Tags), s.scope.AdditionalTags())
 	s.scope.Debug("Tags", "tagsToAdd", tagsToAdd, "tagsToDelete", tagsToDelete)
