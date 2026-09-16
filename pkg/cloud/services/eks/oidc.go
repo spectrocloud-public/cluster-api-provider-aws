@@ -57,10 +57,6 @@ func (s *Service) reconcileOIDCProvider(cluster *eks.Cluster) error {
 		return nil
 	}
 
-	if !s.scope.EnableIAM() {
-		return errors.New("'AssociateOIDCProvider' provided without enabling the 'EKSEnableIAM' feature flag")
-	}
-
 	s.scope.Info("Reconciling EKS OIDC Provider", "cluster-name", cluster.Name)
 
 	oidcProvider, err := s.FindAndVerifyOIDCProvider(cluster)
