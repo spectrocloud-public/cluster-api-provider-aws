@@ -487,6 +487,25 @@ func (w *AWSMachine) Default(_ context.Context, obj runtime.Object) error {
 		r.Spec.Ignition.Version = infrav1.DefaultIgnitionVersion
 	}
 
+	// PCP-7657: Heal the v2.10.0 hostAffinity poisoning.
+	//
+	// Background: PR #5631 (v2.10.0) introduced hostAffinity with a default of "host".
+	// PR #5801 (v2.10.1) corrected the default to "default". PR #5825 / #5871 (v2.10.2)
+	// added validation requiring tenancy="host" when hostAffinity="host". Objects
+	// created under v2.10.0 retain hostAffinity="host" even when tenancy is not "host".
+	// The existing update-path grandfather (validateHostAllocationUpdate) tolerates the
+	// combo on update, but AWSMachines cloned from a poisoned AWSMachineTemplate are
+	// created fresh — the create validator has no grandfather, so scale-up on any pool
+	// whose template was written under v2.10.0 fails permanently.
+	//
+	// Silently rewriting hostAffinity to "default" whenever it is "host" but tenancy is
+	// not "host" heals cloned AWSMachines before validation runs, without affecting
+	// legitimate dedicated-host configurations (which set both fields to "host").
+	if r.Spec.HostAffinity != nil && *r.Spec.HostAffinity == hostAffinity && r.Spec.Tenancy != hostTenancy {
+		defaultAffinity := "default"
+		r.Spec.HostAffinity = &defaultAffinity
+	}
+
 	return nil
 }
 

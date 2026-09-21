@@ -41,6 +41,84 @@ func TestMachineDefault(t *testing.T) {
 	g.Expect(machine.Spec.CloudInit.SecureSecretsBackend).To(Equal(infrav1.SecretBackendSecretsManager))
 }
 
+// TestMachineDefaultHostAffinityHealing covers the PCP-7657 healing mutation:
+// AWSMachines cloned from AWSMachineTemplates written under CAPA v2.10.0 carry
+// hostAffinity="host" without tenancy="host". Default() must rewrite hostAffinity
+// to "default" for those cases while leaving legitimate configurations untouched.
+func TestMachineDefaultHostAffinityHealing(t *testing.T) {
+	tests := []struct {
+		name             string
+		machine          *infrav1.AWSMachine
+		wantHostAffinity *string
+	}{
+		{
+			name: "heals v2.10.0 poison: hostAffinity=host without tenancy=host",
+			machine: &infrav1.AWSMachine{
+				Spec: infrav1.AWSMachineSpec{
+					InstanceType: "test",
+					HostAffinity: ptr.To("host"),
+				},
+			},
+			wantHostAffinity: ptr.To("default"),
+		},
+		{
+			name: "heals v2.10.0 poison: hostAffinity=host with tenancy=default",
+			machine: &infrav1.AWSMachine{
+				Spec: infrav1.AWSMachineSpec{
+					InstanceType: "test",
+					Tenancy:      "default",
+					HostAffinity: ptr.To("host"),
+				},
+			},
+			wantHostAffinity: ptr.To("default"),
+		},
+		{
+			name: "preserves legitimate dedicated-host: hostAffinity=host with tenancy=host",
+			machine: &infrav1.AWSMachine{
+				Spec: infrav1.AWSMachineSpec{
+					InstanceType: "test",
+					Tenancy:      "host",
+					HostAffinity: ptr.To("host"),
+				},
+			},
+			wantHostAffinity: ptr.To("host"),
+		},
+		{
+			name: "preserves hostAffinity=default regardless of tenancy",
+			machine: &infrav1.AWSMachine{
+				Spec: infrav1.AWSMachineSpec{
+					InstanceType: "test",
+					HostAffinity: ptr.To("default"),
+				},
+			},
+			wantHostAffinity: ptr.To("default"),
+		},
+		{
+			name: "leaves nil hostAffinity nil",
+			machine: &infrav1.AWSMachine{
+				Spec: infrav1.AWSMachineSpec{
+					InstanceType: "test",
+				},
+			},
+			wantHostAffinity: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			err := (&AWSMachine{}).Default(context.Background(), tt.machine)
+			g.Expect(err).NotTo(HaveOccurred())
+			if tt.wantHostAffinity == nil {
+				g.Expect(tt.machine.Spec.HostAffinity).To(BeNil())
+			} else {
+				g.Expect(tt.machine.Spec.HostAffinity).NotTo(BeNil())
+				g.Expect(*tt.machine.Spec.HostAffinity).To(Equal(*tt.wantHostAffinity))
+			}
+		})
+	}
+}
+
 func TestAWSMachineCreate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -643,7 +721,12 @@ func TestAWSMachineCreate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "hostAffinity=host without tenancy=host is invalid",
+			// PCP-7657: the mutating webhook heals the v2.10.0-poisoned combo
+			// (hostAffinity="host" without tenancy="host") to hostAffinity="default"
+			// before validation runs, so the object is admitted successfully. The
+			// direct-Default() unit tests in TestMachineDefaultHostAffinityHealing
+			// assert the rewrite; here we only assert admission succeeds.
+			name: "hostAffinity=host without tenancy=host is healed to default (PCP-7657)",
 			machine: &infrav1.AWSMachine{
 				Spec: infrav1.AWSMachineSpec{
 					InstanceType: "test",
@@ -651,7 +734,7 @@ func TestAWSMachineCreate(t *testing.T) {
 					HostAffinity: ptr.To("host"),
 				},
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "dynamicHostAllocation without tenancy=host is invalid",
