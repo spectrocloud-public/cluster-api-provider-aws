@@ -27,6 +27,7 @@ import (
 	"github.com/blang/semver"
 	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
+	admissionv1 "k8s.io/api/admission/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -463,10 +464,18 @@ func (w *AWSMachine) ValidateDelete(_ context.Context, _ runtime.Object) (admiss
 
 // Default implements webhook.Defaulter such that an empty CloudInit will be defined with a default
 // SecureSecretsBackend as SecretBackendSecretsManager iff InsecureSkipSecretsManager is unset.
-func (w *AWSMachine) Default(_ context.Context, obj runtime.Object) error {
+func (w *AWSMachine) Default(ctx context.Context, obj runtime.Object) error {
 	r, ok := obj.(*infrav1.AWSMachine)
 	if !ok {
 		return fmt.Errorf("expected an AWSMachine object but got %T", r)
+	}
+
+	// PCP-7657: on CREATE, if hostAffinity="host" but tenancy!="host", set hostAffinity="default".
+	if req, err := admission.RequestFromContext(ctx); err == nil && req.Operation == admissionv1.Create {
+		if r.Spec.HostAffinity != nil && *r.Spec.HostAffinity == hostAffinity && r.Spec.Tenancy != hostTenancy {
+			defaultAffinity := "default"
+			r.Spec.HostAffinity = &defaultAffinity
+		}
 	}
 
 	if !r.Spec.CloudInit.InsecureSkipSecretsManager && r.Spec.CloudInit.SecureSecretsBackend == "" && !w.ignitionEnabled(r) {
