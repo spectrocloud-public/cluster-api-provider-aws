@@ -41,28 +41,31 @@ func TestMachineDefault(t *testing.T) {
 	g.Expect(machine.Spec.CloudInit.SecureSecretsBackend).To(Equal(infrav1.SecretBackendSecretsManager))
 }
 
-// TestMachineDefaultHostAffinityHealing covers the PCP-7657 healing mutation:
-// AWSMachines cloned from AWSMachineTemplates written under CAPA v2.10.0 carry
-// hostAffinity="host" without tenancy="host". Default() must rewrite hostAffinity
-// to "default" for those cases while leaving legitimate configurations untouched.
-func TestMachineDefaultHostAffinityHealing(t *testing.T) {
+// TestMachineCreateHostAffinityGrandfathered covers the PCP-7657 validator
+// grandfather: AWSMachines cloned from AWSMachineTemplates written under CAPA
+// v2.7.1-spectro-4.9/4.10 (with +kubebuilder:default=host on hostAffinity) carry
+// hostAffinity="host" without tenancy="host". validateHostAllocation must tolerate
+// that specific combo instead of rejecting, so cloned machines admit successfully.
+// Other host-allocation validations (hostID/HRG/DHA requiring tenancy=host,
+// mutual exclusivity, DHA requiring hostAffinity=host) still fire.
+func TestMachineCreateHostAffinityGrandfathered(t *testing.T) {
 	tests := []struct {
-		name             string
-		machine          *infrav1.AWSMachine
-		wantHostAffinity *string
+		name    string
+		machine *infrav1.AWSMachine
+		wantErr bool
 	}{
 		{
-			name: "heals v2.10.0 poison: hostAffinity=host without tenancy=host",
+			name: "grandfathered: hostAffinity=host without tenancy=host is tolerated",
 			machine: &infrav1.AWSMachine{
 				Spec: infrav1.AWSMachineSpec{
 					InstanceType: "test",
 					HostAffinity: ptr.To("host"),
 				},
 			},
-			wantHostAffinity: ptr.To("default"),
+			wantErr: false,
 		},
 		{
-			name: "heals v2.10.0 poison: hostAffinity=host with tenancy=default",
+			name: "grandfathered: hostAffinity=host with tenancy=default is tolerated",
 			machine: &infrav1.AWSMachine{
 				Spec: infrav1.AWSMachineSpec{
 					InstanceType: "test",
@@ -70,10 +73,10 @@ func TestMachineDefaultHostAffinityHealing(t *testing.T) {
 					HostAffinity: ptr.To("host"),
 				},
 			},
-			wantHostAffinity: ptr.To("default"),
+			wantErr: false,
 		},
 		{
-			name: "preserves legitimate dedicated-host: hostAffinity=host with tenancy=host",
+			name: "still valid: hostAffinity=host with tenancy=host",
 			machine: &infrav1.AWSMachine{
 				Spec: infrav1.AWSMachineSpec{
 					InstanceType: "test",
@@ -81,39 +84,39 @@ func TestMachineDefaultHostAffinityHealing(t *testing.T) {
 					HostAffinity: ptr.To("host"),
 				},
 			},
-			wantHostAffinity: ptr.To("host"),
+			wantErr: false,
 		},
 		{
-			name: "preserves hostAffinity=default regardless of tenancy",
+			name: "still valid: hostAffinity=default with any tenancy",
 			machine: &infrav1.AWSMachine{
 				Spec: infrav1.AWSMachineSpec{
 					InstanceType: "test",
 					HostAffinity: ptr.To("default"),
 				},
 			},
-			wantHostAffinity: ptr.To("default"),
+			wantErr: false,
 		},
 		{
-			name: "leaves nil hostAffinity nil",
+			name: "hostID still requires tenancy=host (grandfather does NOT extend to hostID)",
 			machine: &infrav1.AWSMachine{
 				Spec: infrav1.AWSMachineSpec{
 					InstanceType: "test",
+					Tenancy:      "default",
+					HostID:       ptr.To("h-09dcf61cb388b0149"),
 				},
 			},
-			wantHostAffinity: nil,
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
-			err := (&AWSMachine{}).Default(context.Background(), tt.machine)
-			g.Expect(err).NotTo(HaveOccurred())
-			if tt.wantHostAffinity == nil {
-				g.Expect(tt.machine.Spec.HostAffinity).To(BeNil())
+			errs := (&AWSMachine{}).validateHostAllocation(tt.machine)
+			if tt.wantErr {
+				g.Expect(errs).ToNot(BeEmpty())
 			} else {
-				g.Expect(tt.machine.Spec.HostAffinity).NotTo(BeNil())
-				g.Expect(*tt.machine.Spec.HostAffinity).To(Equal(*tt.wantHostAffinity))
+				g.Expect(errs).To(BeEmpty())
 			}
 		})
 	}
@@ -721,12 +724,12 @@ func TestAWSMachineCreate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			// PCP-7657: the mutating webhook heals the v2.10.0-poisoned combo
-			// (hostAffinity="host" without tenancy="host") to hostAffinity="default"
-			// before validation runs, so the object is admitted successfully. The
-			// direct-Default() unit tests in TestMachineDefaultHostAffinityHealing
-			// assert the rewrite; here we only assert admission succeeds.
-			name: "hostAffinity=host without tenancy=host is healed to default (PCP-7657)",
+			// PCP-7657: the validator grandfathers the v2.10.0-poisoned combo
+			// (hostAffinity="host" without tenancy="host") — historical templates
+			// carry this shape and cloning them into fresh AWSMachines would
+			// otherwise fail scale-up. See validateHostAllocation for details;
+			// direct unit tests in TestMachineCreateHostAffinityGrandfathered.
+			name: "hostAffinity=host without tenancy=host is grandfathered (PCP-7657)",
 			machine: &infrav1.AWSMachine{
 				Spec: infrav1.AWSMachineSpec{
 					InstanceType: "test",
