@@ -23,6 +23,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	. "github.com/onsi/gomega"
+	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilfeature "k8s.io/component-base/featuregate/testing"
 	"k8s.io/utils/ptr"
@@ -30,6 +31,7 @@ import (
 	infrav1 "sigs.k8s.io/cluster-api-provider-aws/v2/api/v1beta2"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/feature"
 	utildefaulting "sigs.k8s.io/cluster-api-provider-aws/v2/util/defaulting"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 func TestMachineDefault(t *testing.T) {
@@ -41,46 +43,54 @@ func TestMachineDefault(t *testing.T) {
 	g.Expect(machine.Spec.CloudInit.SecureSecretsBackend).To(Equal(infrav1.SecretBackendSecretsManager))
 }
 
-// TestValidateHostAllocationHostAffinityAllowed covers PCP-7657: hostAffinity="host"
-// with tenancy!="host" is accepted; other host-allocation checks are unaffected.
-func TestValidateHostAllocationHostAffinityAllowed(t *testing.T) {
+// TestMachineDefaultHostAffinityPCP7657 covers the CREATE-only heal:
+// hostAffinity="host" with tenancy!="host" is rewritten to "default"; on UPDATE
+// the value is left alone (AWSMachine spec is immutable except for a small whitelist).
+func TestMachineDefaultHostAffinityPCP7657(t *testing.T) {
+	createCtx := admission.NewContextWithRequest(context.Background(), admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{Operation: admissionv1.Create},
+	})
+	updateCtx := admission.NewContextWithRequest(context.Background(), admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{Operation: admissionv1.Update},
+	})
+
 	tests := []struct {
-		name    string
-		machine *infrav1.AWSMachine
-		wantErr bool
+		name             string
+		ctx              context.Context
+		machine          *infrav1.AWSMachine
+		wantHostAffinity *string
 	}{
 		{
-			name: "hostAffinity=host without tenancy=host is accepted",
+			name: "create: hostAffinity=host without tenancy=host becomes default",
+			ctx:  createCtx,
 			machine: &infrav1.AWSMachine{
-				Spec: infrav1.AWSMachineSpec{
-					InstanceType: "test",
-					HostAffinity: ptr.To("host"),
-				},
+				Spec: infrav1.AWSMachineSpec{InstanceType: "test", HostAffinity: ptr.To("host")},
 			},
-			wantErr: false,
+			wantHostAffinity: ptr.To("default"),
 		},
 		{
-			name: "hostID without tenancy=host is still rejected",
+			name: "create: hostAffinity=host with tenancy=host is preserved",
+			ctx:  createCtx,
 			machine: &infrav1.AWSMachine{
-				Spec: infrav1.AWSMachineSpec{
-					InstanceType: "test",
-					Tenancy:      "default",
-					HostID:       ptr.To("h-09dcf61cb388b0149"),
-				},
+				Spec: infrav1.AWSMachineSpec{InstanceType: "test", Tenancy: "host", HostAffinity: ptr.To("host")},
 			},
-			wantErr: true,
+			wantHostAffinity: ptr.To("host"),
+		},
+		{
+			name: "update: hostAffinity=host without tenancy=host is left alone",
+			ctx:  updateCtx,
+			machine: &infrav1.AWSMachine{
+				Spec: infrav1.AWSMachineSpec{InstanceType: "test", HostAffinity: ptr.To("host")},
+			},
+			wantHostAffinity: ptr.To("host"),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
-			errs := (&AWSMachine{}).validateHostAllocation(tt.machine)
-			if tt.wantErr {
-				g.Expect(errs).ToNot(BeEmpty())
-			} else {
-				g.Expect(errs).To(BeEmpty())
-			}
+			g.Expect((&AWSMachine{}).Default(tt.ctx, tt.machine)).To(Succeed())
+			g.Expect(tt.machine.Spec.HostAffinity).To(Equal(tt.wantHostAffinity))
 		})
 	}
 }
