@@ -41,21 +41,16 @@ func TestMachineDefault(t *testing.T) {
 	g.Expect(machine.Spec.CloudInit.SecureSecretsBackend).To(Equal(infrav1.SecretBackendSecretsManager))
 }
 
-// TestMachineCreateHostAffinityGrandfathered covers the PCP-7657 validator
-// grandfather: AWSMachines cloned from AWSMachineTemplates written under CAPA
-// v2.7.1-spectro-4.9/4.10 (with +kubebuilder:default=host on hostAffinity) carry
-// hostAffinity="host" without tenancy="host". validateHostAllocation must tolerate
-// that specific combo instead of rejecting, so cloned machines admit successfully.
-// Other host-allocation validations (hostID/HRG/DHA requiring tenancy=host,
-// mutual exclusivity, DHA requiring hostAffinity=host) still fire.
-func TestMachineCreateHostAffinityGrandfathered(t *testing.T) {
+// TestValidateHostAllocationHostAffinityAllowed covers PCP-7657: hostAffinity="host"
+// with tenancy!="host" is accepted; other host-allocation checks are unaffected.
+func TestValidateHostAllocationHostAffinityAllowed(t *testing.T) {
 	tests := []struct {
 		name    string
 		machine *infrav1.AWSMachine
 		wantErr bool
 	}{
 		{
-			name: "grandfathered: hostAffinity=host without tenancy=host is tolerated",
+			name: "hostAffinity=host without tenancy=host is accepted",
 			machine: &infrav1.AWSMachine{
 				Spec: infrav1.AWSMachineSpec{
 					InstanceType: "test",
@@ -65,39 +60,7 @@ func TestMachineCreateHostAffinityGrandfathered(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "grandfathered: hostAffinity=host with tenancy=default is tolerated",
-			machine: &infrav1.AWSMachine{
-				Spec: infrav1.AWSMachineSpec{
-					InstanceType: "test",
-					Tenancy:      "default",
-					HostAffinity: ptr.To("host"),
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "still valid: hostAffinity=host with tenancy=host",
-			machine: &infrav1.AWSMachine{
-				Spec: infrav1.AWSMachineSpec{
-					InstanceType: "test",
-					Tenancy:      "host",
-					HostAffinity: ptr.To("host"),
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "still valid: hostAffinity=default with any tenancy",
-			machine: &infrav1.AWSMachine{
-				Spec: infrav1.AWSMachineSpec{
-					InstanceType: "test",
-					HostAffinity: ptr.To("default"),
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "hostID still requires tenancy=host (grandfather does NOT extend to hostID)",
+			name: "hostID without tenancy=host is still rejected",
 			machine: &infrav1.AWSMachine{
 				Spec: infrav1.AWSMachineSpec{
 					InstanceType: "test",
@@ -724,12 +687,8 @@ func TestAWSMachineCreate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			// PCP-7657: the validator grandfathers the v2.10.0-poisoned combo
-			// (hostAffinity="host" without tenancy="host") — historical templates
-			// carry this shape and cloning them into fresh AWSMachines would
-			// otherwise fail scale-up. See validateHostAllocation for details;
-			// direct unit tests in TestMachineCreateHostAffinityGrandfathered.
-			name: "hostAffinity=host without tenancy=host is grandfathered (PCP-7657)",
+			// PCP-7657: hostAffinity="host" without tenancy="host" is allowed.
+			name: "hostAffinity=host without tenancy=host is allowed (PCP-7657)",
 			machine: &infrav1.AWSMachine{
 				Spec: infrav1.AWSMachineSpec{
 					InstanceType: "test",

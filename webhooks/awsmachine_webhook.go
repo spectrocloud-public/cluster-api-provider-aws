@@ -533,30 +533,7 @@ func (w *AWSMachine) validateHostAllocation(r *infrav1.AWSMachine) field.ErrorLi
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.hostResourceGroupArn"), "hostResourceGroupArn can only be set when tenancy is 'host'"))
 	}
 
-	// PCP-7657: tolerate hostAffinity="host" without tenancy="host" on CREATE.
-	//
-	// Background: PR #5631 (v2.10.0) introduced hostAffinity with a default of "host".
-	// PR #5801 (v2.10.1) corrected the default to "default". PR #5825 / #5871 (v2.10.2)
-	// added the validation below requiring tenancy="host" when hostAffinity="host".
-	// Objects created (or templates written) under v2.10.0 retain hostAffinity="host"
-	// even when tenancy is not "host". Cloning a poisoned AWSMachineTemplate produces
-	// a fresh AWSMachine with the same invalid combo — the create validator (this
-	// function) has no grandfather, so scale-up on any pool whose template was
-	// written under v2.10.0 fails permanently. The existing update-path grandfather
-	// (validateHostAllocationUpdate) already tolerates this combo; extending the same
-	// tolerance to CREATE unblocks the clone.
-	//
-	// Semantically safe: Placement.Affinity is only used at EC2 launch when either
-	// HostID or HostResourceGroupArn is set (see pkg/cloud/services/ec2/instances.go
-	// lines 726-773). For plain shared-tenancy machines cloned from poisoned templates
-	// (no HostID, no HRG), hostAffinity="host" is a no-op at run time.
-	//
-	// Preserved: hostID / hostResourceGroupArn / dynamicHostAllocation still require
-	// tenancy="host" (see the other checks in this function). Only the standalone
-	// hostAffinity check is grandfathered.
-	if r.Spec.HostAffinity != nil && *r.Spec.HostAffinity == hostAffinity && r.Spec.Tenancy != hostTenancy {
-		// grandfathered — do not append error
-	}
+	// PCP-7657: hostAffinity="host" with tenancy!="host" is allowed; runtime no-op unless HostID or HostResourceGroupArn is set.
 
 	if hasDynamicHostAllocation && r.Spec.Tenancy != hostTenancy {
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.dynamicHostAllocation"), "dynamicHostAllocation can only be set when tenancy is 'host'"))
