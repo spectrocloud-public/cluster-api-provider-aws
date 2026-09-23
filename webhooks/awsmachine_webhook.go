@@ -470,11 +470,37 @@ func (w *AWSMachine) Default(ctx context.Context, obj runtime.Object) error {
 		return fmt.Errorf("expected an AWSMachine object but got %T", r)
 	}
 
-	// PCP-7657: on CREATE, if hostAffinity="host" but tenancy!="host", set hostAffinity="default".
+	// PCP-7657: heal grandfathered AWSMachineTemplates that were written under
+	// older Spectro CAPA CRDs where +kubebuilder:default=host on HostAffinity
+	// produced combinations the current validateHostAllocation webhook rejects.
+	// CREATE-only because AWSMachine.Spec is immutable on UPDATE.
+	//
+	// Two flavors are healed:
+	//   - Plain pool (Tenancy != "host", HostAffinity == "host", no source):
+	//     the pool never intended dedicated placement — the "host" HostAffinity
+	//     came from the CRD default. Reset HostAffinity to "default".
+	//   - Annotation pool (Tenancy == "host", HostAffinity == "host", no source):
+	//     the pool did intend dedicated placement via node-tenancy annotation but
+	//     was written before Palette started emitting DynamicHostAllocation.
+	//     Preserve the intent by setting DynamicHostAllocation as the host source.
 	if req, err := admission.RequestFromContext(ctx); err == nil && req.Operation == admissionv1.Create {
-		if r.Spec.HostAffinity != nil && *r.Spec.HostAffinity == hostAffinity && r.Spec.Tenancy != hostTenancy {
-			defaultAffinity := "default"
-			r.Spec.HostAffinity = &defaultAffinity
+		hasHostID := r.Spec.HostID != nil && len(*r.Spec.HostID) > 0
+		hasHRG := r.Spec.HostResourceGroupArn != nil && len(*r.Spec.HostResourceGroupArn) > 0
+		hasDHA := r.Spec.DynamicHostAllocation != nil
+		hasSource := hasHostID || hasHRG || hasDHA
+		isHostAffinityHost := r.Spec.HostAffinity != nil && *r.Spec.HostAffinity == hostAffinity
+
+		if isHostAffinityHost && !hasSource {
+			if r.Spec.Tenancy == hostTenancy {
+				// Annotation-based dedicated pool: satisfy validator by adding DHA
+				// as the host source; preserves the pool's dedicated placement intent.
+				r.Spec.DynamicHostAllocation = &infrav1.DynamicHostAllocationSpec{}
+			} else {
+				// Plain pool: HostAffinity=host was accidental (old CRD default).
+				// Reset to "default" so the pool continues to run on shared tenancy.
+				defaultAffinity := "default"
+				r.Spec.HostAffinity = &defaultAffinity
+			}
 		}
 	}
 
