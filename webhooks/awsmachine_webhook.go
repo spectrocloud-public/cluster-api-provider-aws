@@ -533,9 +533,7 @@ func (w *AWSMachine) validateHostAllocation(r *infrav1.AWSMachine) field.ErrorLi
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.hostResourceGroupArn"), "hostResourceGroupArn can only be set when tenancy is 'host'"))
 	}
 
-	if r.Spec.HostAffinity != nil && *r.Spec.HostAffinity == hostAffinity && r.Spec.Tenancy != hostTenancy {
-		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.hostAffinity"), "hostAffinity can only be set to 'host' when tenancy is 'host'"))
-	}
+	// PCP-7657: hostAffinity vs tenancy check removed; AWS ignores hostAffinity when tenancy != "host".
 
 	if hasDynamicHostAllocation && r.Spec.Tenancy != hostTenancy {
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.dynamicHostAllocation"), "dynamicHostAllocation can only be set when tenancy is 'host'"))

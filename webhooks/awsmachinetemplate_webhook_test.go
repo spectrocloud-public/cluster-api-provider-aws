@@ -104,7 +104,8 @@ func TestAWSMachineTemplateValidateCreate(t *testing.T) {
 			wantError: true,
 		},
 		{
-			name: "hostAffinity=host requires hostID or dynamicHostAllocation",
+			// PCP-7657: hostAffinity="host" no longer requires an explicit source; AWS uses auto-placement.
+			name: "hostAffinity=host without source is valid (auto-placement) (PCP-7657)",
 			inputTemplate: &infrav1.AWSMachineTemplate{
 				ObjectMeta: metav1.ObjectMeta{},
 				Spec: infrav1.AWSMachineTemplateSpec{
@@ -117,7 +118,7 @@ func TestAWSMachineTemplateValidateCreate(t *testing.T) {
 					},
 				},
 			},
-			wantError: true,
+			wantError: false,
 		},
 		{
 			name: "hostAffinity=host with hostID is valid",

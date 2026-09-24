@@ -207,17 +207,10 @@ func (w *AWSMachineTemplate) validateHostAllocation(r *infrav1.AWSMachineTemplat
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.template.spec.hostResourceGroupArn"), "hostResourceGroupArn can only be set when tenancy is 'host'"))
 	}
 
-	if spec.HostAffinity != nil && *spec.HostAffinity == hostAffinity && spec.Tenancy != hostTenancy {
-		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.template.spec.hostAffinity"), "hostAffinity can only be set to 'host' when tenancy is 'host'"))
-	}
+	// PCP-7657: hostAffinity vs tenancy check and hostAffinity-requires-source check removed to allow AWS auto-placement.
 
 	if hasDynamicHostAllocation && spec.Tenancy != hostTenancy {
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.template.spec.dynamicHostAllocation"), "dynamicHostAllocation can only be set when tenancy is 'host'"))
-	}
-
-	// When hostAffinity is "host", either hostID or dynamicHostAllocation must be specified
-	if spec.HostAffinity != nil && *spec.HostAffinity == hostAffinity && !hasHostID && !hasDynamicHostAllocation && !hasHostResourceGroupArn {
-		allErrs = append(allErrs, field.Required(field.NewPath("spec.template.spec.hostID"), "hostID, hostResourceGroupArn, or dynamicHostAllocation must be set when hostAffinity is 'host'"))
 	}
 
 	// DHA needs to have hostAffinity set to "host" to make sure it does not drift off its allocated host when the instance is restarted, otherwise there will be a host not in use still allocated.
