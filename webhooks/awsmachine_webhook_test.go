@@ -643,7 +643,8 @@ func TestAWSMachineCreate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "hostAffinity=host without tenancy=host is invalid",
+			// PCP-7657: hostAffinity="host" without tenancy="host" is now allowed.
+			name: "hostAffinity=host without tenancy=host is valid (PCP-7657)",
 			machine: &infrav1.AWSMachine{
 				Spec: infrav1.AWSMachineSpec{
 					InstanceType: "test",
@@ -651,7 +652,7 @@ func TestAWSMachineCreate(t *testing.T) {
 					HostAffinity: ptr.To("host"),
 				},
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "dynamicHostAllocation without tenancy=host is invalid",
