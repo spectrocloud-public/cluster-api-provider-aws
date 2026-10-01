@@ -47,7 +47,14 @@ var fipsEndpointRegions = map[string]struct{}{
 // aws.FIPSEndpointStateDisabled, which takes precedence over both. The state is
 // therefore only ever narrowed, never turned on for a caller who did not ask
 // for it.
+//
+// An empty region means the caller wants the SDK to resolve the region itself,
+// as the ROSA role config scopes do, so there is nothing to gate on yet and the
+// decision is left to the SDK.
 func FIPSEndpointStateForRegion(region string) aws.FIPSEndpointState {
+	if region == "" {
+		return aws.FIPSEndpointStateUnset
+	}
 	if _, ok := fipsEndpointRegions[region]; ok {
 		return aws.FIPSEndpointStateUnset
 	}

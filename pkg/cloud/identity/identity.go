@@ -32,6 +32,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	infrav1 "sigs.k8s.io/cluster-api-provider-aws/v2/api/v1beta2"
+	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/cloud/endpoints"
 	awsmetrics "sigs.k8s.io/cluster-api-provider-aws/v2/pkg/cloud/metrics"
 	stsservice "sigs.k8s.io/cluster-api-provider-aws/v2/pkg/cloud/services/sts"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/logger"
@@ -60,6 +61,17 @@ func NewAWSStaticPrincipalTypeProvider(identity *infrav1.AWSClusterStaticIdentit
 		AccessKeyID:     accessKeyID,
 		SecretAccessKey: secretAccessKey,
 		SessionToken:    sessionToken,
+	}
+}
+
+// configOptionsForRegion returns the AWS config options every credential path
+// in this package must use. The AssumeRole call that backs a role identity
+// happens before the cluster session is built, so the FIPS region gating has to
+// be applied here too rather than only on the final service config.
+func configOptionsForRegion(region string) []func(*config.LoadOptions) error {
+	return []func(*config.LoadOptions) error{
+		config.WithRegion(region),
+		config.WithUseFIPSEndpoint(endpoints.FIPSEndpointStateForRegion(region)),
 	}
 }
 
@@ -164,7 +176,7 @@ func (p *AWSRolePrincipalTypeProvider) Name() string {
 // Retrieve returns the credential values for the AWSRolePrincipalTypeProvider.
 func (p *AWSRolePrincipalTypeProvider) Retrieve(ctx context.Context) (aws.Credentials, error) {
 	if p.credentials == nil {
-		optFns := []func(*config.LoadOptions) error{config.WithRegion(p.region)}
+		optFns := configOptionsForRegion(p.region)
 		if p.sourceProvider != nil {
 			sourceCreds, err := p.sourceProvider.Retrieve(ctx)
 			if err != nil {
