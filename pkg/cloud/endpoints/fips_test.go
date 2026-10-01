@@ -69,9 +69,9 @@ func TestFIPSEndpointStateForRegion(t *testing.T) {
 			expected: aws.FIPSEndpointStateDisabled,
 		},
 		{
-			name:     "empty region does not serve FIPS endpoints",
+			name:     "empty region defers to the SDK resolution chain",
 			region:   "",
-			expected: aws.FIPSEndpointStateDisabled,
+			expected: aws.FIPSEndpointStateUnset,
 		},
 	}
 
