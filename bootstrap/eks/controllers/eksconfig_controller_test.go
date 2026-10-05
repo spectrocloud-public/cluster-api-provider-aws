@@ -81,3 +81,44 @@ func configOwner(kind string) *bsutil.ConfigOwner {
 	configOwner := bsutil.ConfigOwner{Unstructured: &unstructuredOwner}
 	return &configOwner
 }
+
+func TestTransformEndpointForSecretRegion(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		region   string
+		want     string
+	}{
+		{
+			name:     "non-secret region is left unchanged",
+			endpoint: "https://ABC123.gr7.us-east-1.eks.amazonaws.com",
+			region:   "us-east-1",
+			want:     "https://ABC123.gr7.us-east-1.eks.amazonaws.com",
+		},
+		{
+			name:     "secret region rewrites the commercial endpoint suffix",
+			endpoint: "https://ABC123.gr7.us-east-1.eks.amazonaws.com",
+			region:   usIsoBEast1Region,
+			want:     "https://ABC123.gr7.us-isob-east-1.eks.sc2s.sgov.gov",
+		},
+		{
+			name:     "secret region leaves an unrelated endpoint unchanged",
+			endpoint: "https://ABC123.gr7.eu-west-1.eks.amazonaws.com",
+			region:   usIsoBEast1Region,
+			want:     "https://ABC123.gr7.eu-west-1.eks.amazonaws.com",
+		},
+		{
+			name:     "empty endpoint is left unchanged",
+			endpoint: "",
+			region:   usIsoBEast1Region,
+			want:     "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			g.Expect(transformEndpointForSecretRegion(tc.endpoint, tc.region)).To(Equal(tc.want))
+		})
+	}
+}
