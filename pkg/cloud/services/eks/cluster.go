@@ -638,6 +638,17 @@ func (s *Service) reconcileAccessConfig(ctx context.Context, accessConfig *eksty
 			record.Warnf(s.scope.ControlPlane, "FailedUpdateEKSControlPlane", "Failed to update EKS control plane auth config: %v", err)
 			return errors.Wrapf(err, "failed to update EKS cluster")
 		}
+
+		// Access entries are reconciled right after this and require the new authentication
+		// mode to be in effect. Wait for the authentication mode change to finish so they are
+		// not reconciled while the cluster is still UPDATING.
+		if err := s.EKSClient.WaitUntilClusterActive(
+			ctx,
+			&eks.DescribeClusterInput{Name: aws.String(s.scope.KubernetesClusterName())},
+			s.scope.MaxWaitActiveUpdateDelete,
+		); err != nil {
+			return errors.Wrap(err, "failed waiting for EKS cluster auth config update to complete")
+		}
 	}
 
 	return nil

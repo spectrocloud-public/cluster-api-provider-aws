@@ -606,6 +606,11 @@ func TestReconcileAccessConfig(t *testing.T) {
 				m.
 					UpdateClusterConfig(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.UpdateClusterConfigInput{})).
 					Return(&eks.UpdateClusterConfigOutput{}, nil)
+				m.WaitUntilClusterActive(
+					gomock.Eq(context.TODO()),
+					gomock.Eq(&eks.DescribeClusterInput{Name: aws.String(clusterName)}),
+					gomock.Any(),
+				).Return(nil)
 			},
 			expectError: false,
 		},
@@ -625,6 +630,35 @@ func TestReconcileAccessConfig(t *testing.T) {
 				m.
 					UpdateClusterConfig(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.UpdateClusterConfigInput{})).
 					Return(&eks.UpdateClusterConfigOutput{}, errors.New("Unsupported authentication mode update"))
+			},
+			expectError: true,
+		},
+		{
+			name: "error waiting for auth mode update to complete",
+			expect: func(m *mock_eksiface.MockEKSAPIMockRecorder) {
+				m.
+					DescribeCluster(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.DescribeClusterInput{})).
+					Return(&eks.DescribeClusterOutput{
+						Cluster: &ekstypes.Cluster{
+							Name: aws.String("default.cluster"),
+							AccessConfig: &ekstypes.AccessConfigResponse{
+								AuthenticationMode: ekstypes.AuthenticationModeConfigMap,
+							},
+						},
+					}, nil)
+				m.WaitUntilClusterUpdating(
+					gomock.Eq(context.TODO()),
+					gomock.AssignableToTypeOf(&eks.DescribeClusterInput{}),
+					gomock.Any(),
+				).Return(nil)
+				m.
+					UpdateClusterConfig(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.UpdateClusterConfigInput{})).
+					Return(&eks.UpdateClusterConfigOutput{}, nil)
+				m.WaitUntilClusterActive(
+					gomock.Eq(context.TODO()),
+					gomock.AssignableToTypeOf(&eks.DescribeClusterInput{}),
+					gomock.Any(),
+				).Return(errors.New("exceeded max wait time"))
 			},
 			expectError: true,
 		},

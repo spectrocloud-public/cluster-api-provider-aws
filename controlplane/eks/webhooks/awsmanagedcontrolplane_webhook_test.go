@@ -1123,7 +1123,63 @@ func TestWebhookValidateAccessEntries(t *testing.T) {
 				},
 			},
 			expectError: true,
-			errorSubstr: "kubernetesGroups cannot be specified when type is ec2_linux or ec2_windows",
+			errorSubstr: "kubernetesGroups can only be specified when type is standard",
+		},
+		{
+			name: "invalid fargate_linux access entry with kubernetes groups",
+			accessConfig: &ekscontrolplanev1.AccessConfig{
+				AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+			},
+			accessEntries: []ekscontrolplanev1.AccessEntry{
+				{
+					PrincipalARN:     "arn:aws:iam::123456789012:role/FargatePodExecution",
+					Type:             ekscontrolplanev1.AccessEntryTypeFargateLinux,
+					KubernetesGroups: []string{"system:masters"},
+				},
+			},
+			expectError: true,
+			errorSubstr: "kubernetesGroups can only be specified when type is standard",
+		},
+		{
+			name: "invalid hybrid_linux access entry with kubernetes groups",
+			accessConfig: &ekscontrolplanev1.AccessConfig{
+				AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+			},
+			accessEntries: []ekscontrolplanev1.AccessEntry{
+				{
+					PrincipalARN:     "arn:aws:iam::123456789012:role/HybridNodes",
+					Type:             ekscontrolplanev1.AccessEntryTypeHybridLinux,
+					KubernetesGroups: []string{"system:masters"},
+				},
+			},
+			expectError: true,
+			errorSubstr: "kubernetesGroups can only be specified when type is standard",
+		},
+		{
+			name: "valid kubernetes groups with type not set",
+			accessConfig: &ekscontrolplanev1.AccessConfig{
+				AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+			},
+			accessEntries: []ekscontrolplanev1.AccessEntry{
+				{
+					PrincipalARN:     "arn:aws:iam::123456789012:role/EKSAdmin",
+					KubernetesGroups: []string{"developers"},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "valid fargate_linux access entry without groups or policies",
+			accessConfig: &ekscontrolplanev1.AccessConfig{
+				AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+			},
+			accessEntries: []ekscontrolplanev1.AccessEntry{
+				{
+					PrincipalARN: "arn:aws:iam::123456789012:role/FargatePodExecution",
+					Type:         ekscontrolplanev1.AccessEntryTypeFargateLinux,
+				},
+			},
+			expectError: false,
 		},
 		{
 			name: "invalid ec2_windows access entry with access policies",
@@ -1145,7 +1201,153 @@ func TestWebhookValidateAccessEntries(t *testing.T) {
 				},
 			},
 			expectError: true,
-			errorSubstr: "accessPolicies cannot be specified when type is ec2_linux or ec2_windows",
+			errorSubstr: "accessPolicies can only be specified when type is standard",
+		},
+		{
+			name: "invalid fargate_linux access entry with access policies",
+			accessConfig: &ekscontrolplanev1.AccessConfig{
+				AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+			},
+			accessEntries: []ekscontrolplanev1.AccessEntry{
+				{
+					PrincipalARN: "arn:aws:iam::123456789012:role/FargatePodExecution",
+					Type:         ekscontrolplanev1.AccessEntryTypeFargateLinux,
+					AccessPolicies: []ekscontrolplanev1.AccessPolicyReference{
+						{
+							PolicyARN: "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy",
+							AccessScope: ekscontrolplanev1.AccessScope{
+								Type: ekscontrolplanev1.AccessScopeTypeCluster,
+							},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errorSubstr: "accessPolicies can only be specified when type is standard",
+		},
+		{
+			name: "invalid hybrid_linux access entry with access policies",
+			accessConfig: &ekscontrolplanev1.AccessConfig{
+				AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+			},
+			accessEntries: []ekscontrolplanev1.AccessEntry{
+				{
+					PrincipalARN: "arn:aws:iam::123456789012:role/HybridNodes",
+					Type:         ekscontrolplanev1.AccessEntryTypeHybridLinux,
+					AccessPolicies: []ekscontrolplanev1.AccessPolicyReference{
+						{
+							PolicyARN: "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy",
+							AccessScope: ekscontrolplanev1.AccessScope{
+								Type: ekscontrolplanev1.AccessScopeTypeCluster,
+							},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errorSubstr: "accessPolicies can only be specified when type is standard",
+		},
+		{
+			name: "valid access policies with type not set",
+			accessConfig: &ekscontrolplanev1.AccessConfig{
+				AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+			},
+			accessEntries: []ekscontrolplanev1.AccessEntry{
+				{
+					PrincipalARN: "arn:aws:iam::123456789012:role/EKSAdmin",
+					AccessPolicies: []ekscontrolplanev1.AccessPolicyReference{
+						{
+							PolicyARN: "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy",
+							AccessScope: ekscontrolplanev1.AccessScope{
+								Type: ekscontrolplanev1.AccessScopeTypeCluster,
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "invalid duplicate principal ARN",
+			accessConfig: &ekscontrolplanev1.AccessConfig{
+				AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+			},
+			accessEntries: []ekscontrolplanev1.AccessEntry{
+				{
+					PrincipalARN:     "arn:aws:iam::123456789012:role/EKSAdmin",
+					Type:             ekscontrolplanev1.AccessEntryTypeStandard,
+					KubernetesGroups: []string{"developers"},
+				},
+				{
+					PrincipalARN:     "arn:aws:iam::123456789012:role/EKSAdmin",
+					Type:             ekscontrolplanev1.AccessEntryTypeStandard,
+					KubernetesGroups: []string{"admins"},
+				},
+			},
+			expectError: true,
+			errorSubstr: "spec.accessEntries[1].principalARN: Duplicate value",
+		},
+		{
+			name: "invalid duplicate policy ARN within an access entry",
+			accessConfig: &ekscontrolplanev1.AccessConfig{
+				AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+			},
+			accessEntries: []ekscontrolplanev1.AccessEntry{
+				{
+					PrincipalARN: "arn:aws:iam::123456789012:role/EKSAdmin",
+					Type:         ekscontrolplanev1.AccessEntryTypeStandard,
+					AccessPolicies: []ekscontrolplanev1.AccessPolicyReference{
+						{
+							PolicyARN: "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy",
+							AccessScope: ekscontrolplanev1.AccessScope{
+								Type: ekscontrolplanev1.AccessScopeTypeCluster,
+							},
+						},
+						{
+							PolicyARN: "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy",
+							AccessScope: ekscontrolplanev1.AccessScope{
+								Type:       ekscontrolplanev1.AccessScopeTypeNamespace,
+								Namespaces: []string{"default"},
+							},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errorSubstr: "spec.accessEntries[0].accessPolicies[1].policyARN: Duplicate value",
+		},
+		{
+			name: "valid same policy ARN on different access entries",
+			accessConfig: &ekscontrolplanev1.AccessConfig{
+				AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+			},
+			accessEntries: []ekscontrolplanev1.AccessEntry{
+				{
+					PrincipalARN: "arn:aws:iam::123456789012:role/EKSAdmin",
+					Type:         ekscontrolplanev1.AccessEntryTypeStandard,
+					AccessPolicies: []ekscontrolplanev1.AccessPolicyReference{
+						{
+							PolicyARN: "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy",
+							AccessScope: ekscontrolplanev1.AccessScope{
+								Type: ekscontrolplanev1.AccessScopeTypeCluster,
+							},
+						},
+					},
+				},
+				{
+					PrincipalARN: "arn:aws:iam::123456789012:role/EKSViewer",
+					Type:         ekscontrolplanev1.AccessEntryTypeStandard,
+					AccessPolicies: []ekscontrolplanev1.AccessPolicyReference{
+						{
+							PolicyARN: "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy",
+							AccessScope: ekscontrolplanev1.AccessScope{
+								Type: ekscontrolplanev1.AccessScopeTypeCluster,
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
 		},
 		{
 			name: "invalid access policy with namespace type and no namespaces",
