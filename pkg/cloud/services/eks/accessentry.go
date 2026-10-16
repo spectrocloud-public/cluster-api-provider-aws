@@ -19,7 +19,9 @@ package eks
 import (
 	"context"
 	"slices"
+	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
 	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
 	"github.com/pkg/errors"
@@ -30,38 +32,52 @@ import (
 )
 
 func (s *Service) reconcileAccessEntries(ctx context.Context) error {
-	if len(s.scope.ControlPlane.Spec.AccessEntries) == 0 {
-		s.scope.Info("no access entries defined, skipping reconcile")
-		return nil
-	}
-
-	if s.scope.ControlPlane.Spec.AccessConfig == nil ||
-		s.scope.ControlPlane.Spec.AccessConfig.AuthenticationMode == "" ||
-		(s.scope.ControlPlane.Spec.AccessConfig.AuthenticationMode != ekscontrolplanev1.EKSAuthenticationModeAPI &&
-			s.scope.ControlPlane.Spec.AccessConfig.AuthenticationMode != ekscontrolplanev1.EKSAuthenticationModeAPIAndConfigMap) {
+	// An empty spec list is not a reason to skip: entries previously created by the
+	// controller must still be deleted when the user removes the last one.
+	if !accessEntriesEnabled(s.scope.ControlPlane.Spec.AccessConfig) {
 		s.scope.Info("access mode is not api or api_and_config_map, skipping reconcile")
 		return nil
 	}
 
-	managedAccessEntries, err := s.getManagedAccessEntries(ctx)
+	existingAccessEntries, err := s.getExistingAccessEntries(ctx)
 	if err != nil {
 		return errors.Wrap(err, "failed to list existing access entries")
 	}
 
 	for _, accessEntry := range s.scope.ControlPlane.Spec.AccessEntries {
-		if _, exists := managedAccessEntries[accessEntry.PrincipalARN]; exists {
-			if err := s.updateAccessEntry(ctx, accessEntry); err != nil {
-				return errors.Wrapf(err, "failed to update access entry for principal %s", accessEntry.PrincipalARN)
-			}
-			delete(managedAccessEntries, accessEntry.PrincipalARN)
-		} else {
+		managed, exists := existingAccessEntries[accessEntry.PrincipalARN]
+		switch {
+		case !exists:
 			if err := s.createAccessEntry(ctx, accessEntry); err != nil {
 				return errors.Wrapf(err, "failed to create access entry for principal %s", accessEntry.PrincipalARN)
 			}
+		case managed:
+			if err := s.updateAccessEntry(ctx, accessEntry); err != nil {
+				return errors.Wrapf(err, "failed to update access entry for principal %s", accessEntry.PrincipalARN)
+			}
+		default:
+			// The entry exists but was not created by this controller, e.g. the cluster creator
+			// entry EKS adds when bootstrapClusterCreatorAdminPermissions is true. Only add the
+			// requested access policies: recreating it, deleting it or disassociating its policies
+			// could remove the controller's own cluster-admin access.
+			// Listing such an entry is expected (e.g. to grant the creator extra policies), so only
+			// warn when the spec sets fields that are not applied.
+			if ignored := unmanagedAccessEntryIgnoredFields(accessEntry); len(ignored) > 0 {
+				record.Warnf(s.scope.ControlPlane, "AccessEntryNotManaged", "Access entry for principal %s is not managed by the controller: %s not applied, only access policies are associated", accessEntry.PrincipalARN, strings.Join(ignored, ", "))
+			} else {
+				s.scope.Debug("Access entry not managed by the controller, only associating access policies", "principalARN", accessEntry.PrincipalARN)
+			}
+			if err := s.associateAccessPolicies(ctx, accessEntry); err != nil {
+				return errors.Wrapf(err, "failed to associate access policies for unmanaged principal %s", accessEntry.PrincipalARN)
+			}
 		}
+		delete(existingAccessEntries, accessEntry.PrincipalARN)
 	}
 
-	for principalArn := range managedAccessEntries {
+	for principalArn, managed := range existingAccessEntries {
+		if !managed {
+			continue
+		}
 		if err := s.deleteAccessEntry(ctx, principalArn); err != nil {
 			return errors.Wrapf(err, "failed to delete access entry for principal %s", principalArn)
 		}
@@ -71,7 +87,34 @@ func (s *Service) reconcileAccessEntries(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) getManagedAccessEntries(ctx context.Context) (map[string]bool, error) {
+// unmanagedAccessEntryIgnoredFields returns the spec fields of an access entry that are not
+// applied when the entry exists in EKS but is not managed by the controller.
+func unmanagedAccessEntryIgnoredFields(accessEntry ekscontrolplanev1.AccessEntry) []string {
+	var ignored []string
+	if accessEntry.Type != "" && !strings.EqualFold(string(accessEntry.Type), string(ekscontrolplanev1.AccessEntryTypeStandard)) {
+		ignored = append(ignored, "type")
+	}
+	if accessEntry.Username != "" {
+		ignored = append(ignored, "username")
+	}
+	if len(accessEntry.KubernetesGroups) > 0 {
+		ignored = append(ignored, "kubernetesGroups")
+	}
+	return ignored
+}
+
+// accessEntriesEnabled returns true when the authentication mode allows access entries.
+func accessEntriesEnabled(accessConfig *ekscontrolplanev1.AccessConfig) bool {
+	if accessConfig == nil {
+		return false
+	}
+	return accessConfig.AuthenticationMode == ekscontrolplanev1.EKSAuthenticationModeAPI ||
+		accessConfig.AuthenticationMode == ekscontrolplanev1.EKSAuthenticationModeAPIAndConfigMap
+}
+
+// getExistingAccessEntries returns every access entry of the cluster keyed by principal ARN.
+// The value is true when the entry carries the controller's ownership tag.
+func (s *Service) getExistingAccessEntries(ctx context.Context) (map[string]bool, error) {
 	existingAccessEntries := make(map[string]bool)
 	var nextToken *string
 
@@ -95,15 +138,13 @@ func (s *Service) getManagedAccessEntries(ctx context.Context) (map[string]bool,
 				PrincipalArn: &principalArn,
 			})
 			if err != nil {
-				s.scope.Error(err, "failed to describe access entry", "principalARN", principalArn)
-				continue
+				// Skipping the entry would make a managed entry look unmanaged, so it would be
+				// neither updated nor deleted. Fail and retry on the next reconcile instead.
+				return nil, errors.Wrapf(err, "failed to describe access entry for principal %s", principalArn)
 			}
 
-			if describeOutput.AccessEntry.Tags != nil {
-				if _, managed := describeOutput.AccessEntry.Tags[managedTag]; managed {
-					existingAccessEntries[principalArn] = true
-				}
-			}
+			_, managed := describeOutput.AccessEntry.Tags[managedTag]
+			existingAccessEntries[principalArn] = managed
 		}
 
 		if output.NextToken == nil {
@@ -167,13 +208,16 @@ func (s *Service) updateAccessEntry(ctx context.Context, accessEntry ekscontrolp
 		return errors.Wrapf(err, "failed to describe access entry for principal %s", accessEntry.PrincipalARN)
 	}
 
-	// EKS requires recreate when changing type or removing username
-	existingUsername := ""
-	if describeOutput.AccessEntry.Username != nil {
-		existingUsername = *describeOutput.AccessEntry.Username
+	// Normalize empty spec Type to STANDARD to match what EKS reports for a
+	// default STANDARD entry, so an unset Type is not seen as drift.
+	desiredType := accessEntry.Type
+	if desiredType == "" {
+		desiredType = ekscontrolplanev1.AccessEntryTypeStandard
 	}
 
-	if *accessEntry.Type.APIValue() != *describeOutput.AccessEntry.Type || accessEntry.Username != existingUsername {
+	// Type is the only immutable field, so it is the only one requiring a recreate.
+	// UpdateAccessEntry accepts username and Kubernetes groups.
+	if *desiredType.APIValue() != aws.ToString(describeOutput.AccessEntry.Type) {
 		if err = s.deleteAccessEntry(ctx, accessEntry.PrincipalARN); err != nil {
 			return errors.Wrapf(err, "failed to delete access entry for principal %s during recreation", accessEntry.PrincipalARN)
 		}
@@ -191,9 +235,25 @@ func (s *Service) updateAccessEntry(ctx context.Context, accessEntry ekscontrolp
 		ClusterName:  &clusterName,
 		PrincipalArn: &accessEntry.PrincipalARN,
 	}
+	needsUpdate := false
 
 	if !slices.Equal(accessEntry.KubernetesGroups, describeOutput.AccessEntry.KubernetesGroups) {
 		updateInput.KubernetesGroups = accessEntry.KubernetesGroups
+		needsUpdate = true
+	}
+
+	// An unset username means EKS generates one, so the generated value is not drift.
+	existingUsername := ""
+	if describeOutput.AccessEntry.Username != nil {
+		existingUsername = *describeOutput.AccessEntry.Username
+	}
+
+	if accessEntry.Username != "" && accessEntry.Username != existingUsername {
+		updateInput.Username = &accessEntry.Username
+		needsUpdate = true
+	}
+
+	if needsUpdate {
 		if _, err := s.EKSClient.UpdateAccessEntry(ctx, updateInput); err != nil {
 			return errors.Wrapf(err, "failed to update access entry for principal %s", accessEntry.PrincipalARN)
 		}
@@ -220,8 +280,8 @@ func (s *Service) deleteAccessEntry(ctx context.Context, principalArn string) er
 }
 
 func (s *Service) reconcileAccessPolicies(ctx context.Context, accessEntry ekscontrolplanev1.AccessEntry) error {
-	if accessEntry.Type == ekscontrolplanev1.AccessEntryTypeEC2Linux || accessEntry.Type == ekscontrolplanev1.AccessEntryTypeEC2Windows {
-		s.scope.Info("Skipping access policy reconciliation for EC2 access type", "principalARN", accessEntry.PrincipalARN)
+	if !supportsAccessPolicies(accessEntry.Type) {
+		s.scope.Info("Skipping access policy reconciliation for non-standard access entry type", "principalARN", accessEntry.PrincipalARN, "type", accessEntry.Type)
 		return nil
 	}
 
@@ -230,29 +290,15 @@ func (s *Service) reconcileAccessPolicies(ctx context.Context, accessEntry eksco
 		return errors.Wrapf(err, "failed to get existing access policies for principal %s", accessEntry.PrincipalARN)
 	}
 
-	clusterName := s.scope.KubernetesClusterName()
+	if err := s.associateMissingAccessPolicies(ctx, accessEntry, existingPolicies); err != nil {
+		return err
+	}
 
 	for _, policy := range accessEntry.AccessPolicies {
-		input := &eks.AssociateAccessPolicyInput{
-			ClusterName:  &clusterName,
-			PrincipalArn: &accessEntry.PrincipalARN,
-			PolicyArn:    &policy.PolicyARN,
-			AccessScope: &ekstypes.AccessScope{
-				Type: ekstypes.AccessScopeType(policy.AccessScope.Type),
-			},
-		}
-
-		if policy.AccessScope.Type == "namespace" && len(policy.AccessScope.Namespaces) > 0 {
-			input.AccessScope.Namespaces = policy.AccessScope.Namespaces
-		}
-
-		if _, err := s.EKSClient.AssociateAccessPolicy(ctx, input); err != nil {
-			return errors.Wrapf(err, "failed to associate access policy %s", policy.PolicyARN)
-		}
-
 		delete(existingPolicies, policy.PolicyARN)
 	}
 
+	clusterName := s.scope.KubernetesClusterName()
 	for policyARN := range existingPolicies {
 		if _, err := s.EKSClient.DisassociateAccessPolicy(ctx, &eks.DisassociateAccessPolicyInput{
 			ClusterName:  &clusterName,
@@ -264,6 +310,79 @@ func (s *Service) reconcileAccessPolicies(ctx context.Context, accessEntry eksco
 	}
 
 	return nil
+}
+
+// associateAccessPolicies only adds the access policies of the spec to an access entry; it never
+// disassociates existing ones. It is used for access entries not managed by the controller.
+func (s *Service) associateAccessPolicies(ctx context.Context, accessEntry ekscontrolplanev1.AccessEntry) error {
+	if !supportsAccessPolicies(accessEntry.Type) || len(accessEntry.AccessPolicies) == 0 {
+		return nil
+	}
+
+	existingPolicies, err := s.getExistingAccessPolicies(ctx, accessEntry.PrincipalARN)
+	if err != nil {
+		return errors.Wrapf(err, "failed to get existing access policies for principal %s", accessEntry.PrincipalARN)
+	}
+
+	return s.associateMissingAccessPolicies(ctx, accessEntry, existingPolicies)
+}
+
+// associateMissingAccessPolicies associates the policies of the access entry that are not yet
+// associated, or whose access scope differs from the associated one. Unchanged policies are
+// skipped to avoid an AWS call per policy on every reconcile.
+func (s *Service) associateMissingAccessPolicies(ctx context.Context, accessEntry ekscontrolplanev1.AccessEntry, existingPolicies map[string]ekstypes.AssociatedAccessPolicy) error {
+	clusterName := s.scope.KubernetesClusterName()
+
+	for _, policy := range accessEntry.AccessPolicies {
+		if existing, ok := existingPolicies[policy.PolicyARN]; ok && accessScopeEqual(existing.AccessScope, policy.AccessScope) {
+			continue
+		}
+
+		input := &eks.AssociateAccessPolicyInput{
+			ClusterName:  &clusterName,
+			PrincipalArn: &accessEntry.PrincipalARN,
+			PolicyArn:    &policy.PolicyARN,
+			AccessScope: &ekstypes.AccessScope{
+				Type: ekstypes.AccessScopeType(policy.AccessScope.Type),
+			},
+		}
+
+		if policy.AccessScope.Type == ekscontrolplanev1.AccessScopeTypeNamespace && len(policy.AccessScope.Namespaces) > 0 {
+			input.AccessScope.Namespaces = policy.AccessScope.Namespaces
+		}
+
+		if _, err := s.EKSClient.AssociateAccessPolicy(ctx, input); err != nil {
+			return errors.Wrapf(err, "failed to associate access policy %s", policy.PolicyARN)
+		}
+	}
+
+	return nil
+}
+
+// supportsAccessPolicies returns true when access policies can be associated with the access
+// entry type. EKS only allows access policies on standard access entries.
+func supportsAccessPolicies(entryType ekscontrolplanev1.AccessEntryType) bool {
+	return entryType == "" || strings.EqualFold(string(entryType), string(ekscontrolplanev1.AccessEntryTypeStandard))
+}
+
+// accessScopeEqual compares the access scope associated in EKS with the desired one.
+// The EKS scope type is upper case and namespaces are compared ignoring order.
+func accessScopeEqual(existing *ekstypes.AccessScope, desired ekscontrolplanev1.AccessScope) bool {
+	if existing == nil {
+		return false
+	}
+	if !strings.EqualFold(string(existing.Type), string(desired.Type)) {
+		return false
+	}
+	if desired.Type != ekscontrolplanev1.AccessScopeTypeNamespace {
+		return true
+	}
+
+	existingNamespaces := slices.Clone(existing.Namespaces)
+	desiredNamespaces := slices.Clone(desired.Namespaces)
+	slices.Sort(existingNamespaces)
+	slices.Sort(desiredNamespaces)
+	return slices.Equal(existingNamespaces, desiredNamespaces)
 }
 
 func (s *Service) getExistingAccessPolicies(ctx context.Context, principalARN string) (map[string]ekstypes.AssociatedAccessPolicy, error) {

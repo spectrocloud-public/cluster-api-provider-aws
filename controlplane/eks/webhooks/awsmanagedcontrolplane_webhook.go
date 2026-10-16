@@ -389,26 +389,44 @@ func (w *AWSManagedControlPlane) validateAccessEntries(r *ekscontrolplanev1.AWSM
 		)
 	}
 
+	principalARNs := make(map[string]bool, len(r.Spec.AccessEntries))
 	for i, entry := range r.Spec.AccessEntries {
-		// Validate that EC2 types don't have kubernetes groups or access policies
-		if entry.Type == ekscontrolplanev1.AccessEntryTypeEC2Linux || entry.Type == ekscontrolplanev1.AccessEntryTypeEC2Windows {
-			if len(entry.KubernetesGroups) > 0 {
-				allErrs = append(allErrs,
-					field.Invalid(field.NewPath("spec", "accessEntries").Index(i).Child("kubernetesGroups"),
-						entry.KubernetesGroups,
-						"kubernetesGroups cannot be specified when type is ec2_linux or ec2_windows",
-					),
-				)
-			}
+		// Each principal can only have one access entry in EKS
+		if principalARNs[entry.PrincipalARN] {
+			allErrs = append(allErrs,
+				field.Duplicate(field.NewPath("spec", "accessEntries").Index(i).Child("principalARN"), entry.PrincipalARN),
+			)
+		}
+		principalARNs[entry.PrincipalARN] = true
 
-			if len(entry.AccessPolicies) > 0 {
+		// EKS only allows kubernetes groups and access policies on standard access entries
+		isStandard := entry.Type == "" || entry.Type == ekscontrolplanev1.AccessEntryTypeStandard
+		if !isStandard && len(entry.KubernetesGroups) > 0 {
+			allErrs = append(allErrs,
+				field.Invalid(field.NewPath("spec", "accessEntries").Index(i).Child("kubernetesGroups"),
+					entry.KubernetesGroups,
+					"kubernetesGroups can only be specified when type is standard",
+				),
+			)
+		}
+
+		if !isStandard && len(entry.AccessPolicies) > 0 {
+			allErrs = append(allErrs,
+				field.Invalid(field.NewPath("spec", "accessEntries").Index(i).Child("accessPolicies"),
+					entry.AccessPolicies,
+					"accessPolicies can only be specified when type is standard",
+				),
+			)
+		}
+
+		policyARNs := make(map[string]bool, len(entry.AccessPolicies))
+		for j, policy := range entry.AccessPolicies {
+			if policyARNs[policy.PolicyARN] {
 				allErrs = append(allErrs,
-					field.Invalid(field.NewPath("spec", "accessEntries").Index(i).Child("accessPolicies"),
-						entry.AccessPolicies,
-						"accessPolicies cannot be specified when type is ec2_linux or ec2_windows",
-					),
+					field.Duplicate(field.NewPath("spec", "accessEntries").Index(i).Child("accessPolicies").Index(j).Child("policyARN"), policy.PolicyARN),
 				)
 			}
+			policyARNs[policy.PolicyARN] = true
 		}
 
 		// Validate namespace scopes
