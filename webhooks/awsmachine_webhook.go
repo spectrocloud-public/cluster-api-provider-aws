@@ -27,6 +27,7 @@ import (
 	"github.com/blang/semver"
 	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
+	admissionv1 "k8s.io/api/admission/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -463,10 +464,44 @@ func (w *AWSMachine) ValidateDelete(_ context.Context, _ runtime.Object) (admiss
 
 // Default implements webhook.Defaulter such that an empty CloudInit will be defined with a default
 // SecureSecretsBackend as SecretBackendSecretsManager iff InsecureSkipSecretsManager is unset.
-func (w *AWSMachine) Default(_ context.Context, obj runtime.Object) error {
+func (w *AWSMachine) Default(ctx context.Context, obj runtime.Object) error {
 	r, ok := obj.(*infrav1.AWSMachine)
 	if !ok {
 		return fmt.Errorf("expected an AWSMachine object but got %T", r)
+	}
+
+	// PCP-7657: heal grandfathered AWSMachineTemplates that were written under
+	// older Spectro CAPA CRDs where +kubebuilder:default=host on HostAffinity
+	// produced combinations the current validateHostAllocation webhook rejects.
+	// CREATE-only because AWSMachine.Spec is immutable on UPDATE.
+	//
+	// Two flavors are healed:
+	//   - Plain pool (Tenancy != "host", HostAffinity == "host", no source):
+	//     the pool never intended dedicated placement — the "host" HostAffinity
+	//     came from the CRD default. Reset HostAffinity to "default".
+	//   - Annotation pool (Tenancy == "host", HostAffinity == "host", no source):
+	//     the pool did intend dedicated placement via node-tenancy annotation but
+	//     was written before Palette started emitting DynamicHostAllocation.
+	//     Preserve the intent by setting DynamicHostAllocation as the host source.
+	if req, err := admission.RequestFromContext(ctx); err == nil && req.Operation == admissionv1.Create {
+		hasHostID := r.Spec.HostID != nil && len(*r.Spec.HostID) > 0
+		hasHRG := r.Spec.HostResourceGroupArn != nil && len(*r.Spec.HostResourceGroupArn) > 0
+		hasDHA := r.Spec.DynamicHostAllocation != nil
+		hasSource := hasHostID || hasHRG || hasDHA
+		isHostAffinityHost := r.Spec.HostAffinity != nil && *r.Spec.HostAffinity == hostAffinity
+
+		if isHostAffinityHost && !hasSource {
+			if r.Spec.Tenancy == hostTenancy {
+				// Annotation-based dedicated pool: satisfy validator by adding DHA
+				// as the host source; preserves the pool's dedicated placement intent.
+				r.Spec.DynamicHostAllocation = &infrav1.DynamicHostAllocationSpec{}
+			} else {
+				// Plain pool: HostAffinity=host was accidental (old CRD default).
+				// Reset to "default" so the pool continues to run on shared tenancy.
+				defaultAffinity := "default"
+				r.Spec.HostAffinity = &defaultAffinity
+			}
+		}
 	}
 
 	if !r.Spec.CloudInit.InsecureSkipSecretsManager && r.Spec.CloudInit.SecureSecretsBackend == "" && !w.ignitionEnabled(r) {
