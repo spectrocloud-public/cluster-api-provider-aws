@@ -64,7 +64,9 @@ func (s *Service) reconcileAccessEntries(ctx context.Context) error {
 			// EKS adds for bootstrapClusterCreatorAdminPermissions. Creating it would fail with
 			// ResourceInUseException on every reconcile, and updating or deleting it could remove
 			// the controller's own access, so only associate the policies it is missing.
-			s.scope.Debug("Access entry exists but is not managed by CAPA, only associating missing access policies",
+			// Logged at Info so users can see that the entry's type, username and
+			// Kubernetes groups from the spec are not applied.
+			s.scope.Info("Access entry exists but is not managed by CAPA, ignoring its type, username and kubernetesGroups and only associating missing access policies",
 				"principalARN", accessEntry.PrincipalARN)
 			if err := s.associateMissingAccessPolicies(ctx, accessEntry); err != nil {
 				return errors.Wrapf(err, "failed to associate access policies for unmanaged principal %s", accessEntry.PrincipalARN)
@@ -286,7 +288,7 @@ func (s *Service) reconcileAccessPolicies(ctx context.Context, accessEntry eksco
 			},
 		}
 
-		if policy.AccessScope.Type == "namespace" && len(policy.AccessScope.Namespaces) > 0 {
+		if policy.AccessScope.Type == ekscontrolplanev1.AccessScopeTypeNamespace && len(policy.AccessScope.Namespaces) > 0 {
 			input.AccessScope.Namespaces = policy.AccessScope.Namespaces
 		}
 
@@ -311,9 +313,10 @@ func (s *Service) reconcileAccessPolicies(ctx context.Context, accessEntry eksco
 }
 
 // associateMissingAccessPolicies associates the policies of an access entry that CAPA does not
-// manage when they are missing or have a different scope. Unlike reconcileAccessPolicies it never
-// disassociates, so access granted outside CAPA (for example the cluster creator's admin policy)
-// is kept.
+// manage when they are missing. Unlike reconcileAccessPolicies it never disassociates a policy or
+// changes the scope of one that is already associated: AssociateAccessPolicy replaces the scope,
+// so re-associating could narrow access granted outside CAPA (for example the cluster creator's
+// cluster-wide admin policy) and remove the controller's own access.
 func (s *Service) associateMissingAccessPolicies(ctx context.Context, accessEntry ekscontrolplanev1.AccessEntry) error {
 	if accessEntry.Type == ekscontrolplanev1.AccessEntryTypeEC2Linux || accessEntry.Type == ekscontrolplanev1.AccessEntryTypeEC2Windows {
 		return nil
@@ -330,7 +333,11 @@ func (s *Service) associateMissingAccessPolicies(ctx context.Context, accessEntr
 	clusterName := s.scope.KubernetesClusterName()
 
 	for _, policy := range accessEntry.AccessPolicies {
-		if existing, ok := existingPolicies[policy.PolicyARN]; ok && s.policyScopeMatches(policy.AccessScope, existing.AccessScope) {
+		if existing, ok := existingPolicies[policy.PolicyARN]; ok {
+			if !s.policyScopeMatches(policy.AccessScope, existing.AccessScope) {
+				s.scope.Info("Access policy on an access entry not managed by CAPA has a different scope than the spec, leaving it unchanged",
+					"principalARN", accessEntry.PrincipalARN, "policyARN", policy.PolicyARN)
+			}
 			continue
 		}
 
@@ -363,7 +370,9 @@ func (s *Service) policyScopeMatches(desired ekscontrolplanev1.AccessScope, exis
 		return false
 	}
 	if desired.Type == ekscontrolplanev1.AccessScopeTypeNamespace {
-		return slices.Equal(desired.Namespaces, existing.Namespaces)
+		// Namespace order carries no meaning, so compare sorted copies; sorting in place
+		// would reorder the spec and the AWS response.
+		return slices.Equal(slices.Sorted(slices.Values(desired.Namespaces)), slices.Sorted(slices.Values(existing.Namespaces)))
 	}
 	return true
 }
