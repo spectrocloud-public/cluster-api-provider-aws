@@ -524,7 +524,7 @@ func (w *AWSMachine) validateHostAllocation(r *infrav1.AWSMachine) field.ErrorLi
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec"), "hostID, hostResourceGroupArn, and dynamicHostAllocation are mutually exclusive"))
 	}
 
-	// HostID, HostAffinity, HostResourceGroupArn, and DynamicHostAllocation can only be set when Tenancy is "host".
+	// hostID and dynamicHostAllocation require tenancy "host"; hostResourceGroupArn requires tenancy "host" or unset.
 	if hasHostID && r.Spec.Tenancy != hostTenancy {
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.hostID"), "hostID can only be set when tenancy is 'host'"))
 	}
@@ -593,7 +593,7 @@ func (w *AWSMachine) validateHostAllocationUpdate(oldMachine, newMachine *infrav
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec"), "hostID, hostResourceGroupArn, and dynamicHostAllocation are mutually exclusive"))
 	}
 
-	// HostID, HostAffinity, HostResourceGroupArn, and DynamicHostAllocation can only be set when Tenancy is "host".
+	// hostID and dynamicHostAllocation require tenancy "host"; hostResourceGroupArn requires tenancy "host" or unset.
 	if hasHostID && newMachine.Spec.Tenancy != hostTenancy {
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.hostID"), "hostID can only be set when tenancy is 'host'"))
 	}
