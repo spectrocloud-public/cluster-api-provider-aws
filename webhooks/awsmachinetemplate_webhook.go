@@ -198,7 +198,7 @@ func (w *AWSMachineTemplate) validateHostAllocation(r *infrav1.AWSMachineTemplat
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.template.spec"), "hostID, hostResourceGroupArn, and dynamicHostAllocation are mutually exclusive"))
 	}
 
-	// HostID, HostAffinity, HostResourceGroupArn, and DynamicHostAllocation can only be set when Tenancy is "host".
+	// hostID and dynamicHostAllocation require tenancy "host"; hostResourceGroupArn requires tenancy "host" or unset.
 	if hasHostID && spec.Tenancy != hostTenancy {
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.template.spec.hostID"), "hostID can only be set when tenancy is 'host'"))
 	}
