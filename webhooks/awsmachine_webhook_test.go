@@ -681,6 +681,17 @@ func TestAWSMachineCreate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "hostResourceGroupArn with empty tenancy is valid",
+			machine: &infrav1.AWSMachine{
+				Spec: infrav1.AWSMachineSpec{
+					InstanceType:             "test",
+					HostResourceGroupArn:     aws.String("arn:aws:resource-groups:us-west-2:123456789012:group/test-group"),
+					LicenseConfigurationArns: []string{"arn:aws:license-manager:us-west-2:259732043995:license-configuration:lic-4acd3f7c117b9e314cce36e46084d071"},
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "hostID and hostResourceGroupArn are mutually exclusive",
 			machine: &infrav1.AWSMachine{
 				Spec: infrav1.AWSMachineSpec{
@@ -1078,6 +1089,44 @@ func TestValidateHostAllocationUpdate(t *testing.T) {
 					DynamicHostAllocation: &infrav1.DynamicHostAllocationSpec{
 						Tags: map[string]string{"env": "test"},
 					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "hostResourceGroupArn with empty tenancy is valid on update",
+			oldMachine: &infrav1.AWSMachine{
+				Spec: infrav1.AWSMachineSpec{
+					InstanceType:             "test",
+					HostResourceGroupArn:     aws.String("arn:aws:resource-groups:us-west-2:123456789012:group/test-group"),
+					LicenseConfigurationArns: []string{"arn:aws:license-manager:us-west-2:259732043995:license-configuration:lic-4acd3f7c117b9e314cce36e46084d071"},
+				},
+			},
+			newMachine: &infrav1.AWSMachine{
+				Spec: infrav1.AWSMachineSpec{
+					InstanceType:             "test",
+					HostResourceGroupArn:     aws.String("arn:aws:resource-groups:us-west-2:123456789012:group/test-group"),
+					LicenseConfigurationArns: []string{"arn:aws:license-manager:us-west-2:259732043995:license-configuration:lic-4acd3f7c117b9e314cce36e46084d071"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "hostResourceGroupArn with non-host tenancy still enforced on update",
+			oldMachine: &infrav1.AWSMachine{
+				Spec: infrav1.AWSMachineSpec{
+					InstanceType:             "test",
+					Tenancy:                  "default",
+					HostResourceGroupArn:     aws.String("arn:aws:resource-groups:us-west-2:123456789012:group/test-group"),
+					LicenseConfigurationArns: []string{"arn:aws:license-manager:us-west-2:259732043995:license-configuration:lic-4acd3f7c117b9e314cce36e46084d071"},
+				},
+			},
+			newMachine: &infrav1.AWSMachine{
+				Spec: infrav1.AWSMachineSpec{
+					InstanceType:             "test",
+					Tenancy:                  "default",
+					HostResourceGroupArn:     aws.String("arn:aws:resource-groups:us-west-2:123456789012:group/test-group"),
+					LicenseConfigurationArns: []string{"arn:aws:license-manager:us-west-2:259732043995:license-configuration:lic-4acd3f7c117b9e314cce36e46084d071"},
 				},
 			},
 			wantErr: true,

@@ -198,13 +198,14 @@ func (w *AWSMachineTemplate) validateHostAllocation(r *infrav1.AWSMachineTemplat
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.template.spec"), "hostID, hostResourceGroupArn, and dynamicHostAllocation are mutually exclusive"))
 	}
 
-	// HostID, HostAffinity, HostResourceGroupArn, and DynamicHostAllocation can only be set when Tenancy is "host".
+	// hostID and dynamicHostAllocation require tenancy "host"; hostResourceGroupArn requires tenancy "host" or unset.
 	if hasHostID && spec.Tenancy != hostTenancy {
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.template.spec.hostID"), "hostID can only be set when tenancy is 'host'"))
 	}
 
-	if hasHostResourceGroupArn && spec.Tenancy != hostTenancy {
-		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.template.spec.hostResourceGroupArn"), "hostResourceGroupArn can only be set when tenancy is 'host'"))
+	// PCP-7882: empty tenancy is allowed with hostResourceGroupArn; the controller defaults it to "host" at launch.
+	if hasHostResourceGroupArn && spec.Tenancy != "" && spec.Tenancy != hostTenancy {
+		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.template.spec.hostResourceGroupArn"), "hostResourceGroupArn can only be set when tenancy is 'host' or unset"))
 	}
 
 	if spec.HostAffinity != nil && *spec.HostAffinity == hostAffinity && spec.Tenancy != hostTenancy {

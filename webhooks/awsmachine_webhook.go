@@ -524,13 +524,14 @@ func (w *AWSMachine) validateHostAllocation(r *infrav1.AWSMachine) field.ErrorLi
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec"), "hostID, hostResourceGroupArn, and dynamicHostAllocation are mutually exclusive"))
 	}
 
-	// HostID, HostAffinity, HostResourceGroupArn, and DynamicHostAllocation can only be set when Tenancy is "host".
+	// hostID and dynamicHostAllocation require tenancy "host"; hostResourceGroupArn requires tenancy "host" or unset.
 	if hasHostID && r.Spec.Tenancy != hostTenancy {
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.hostID"), "hostID can only be set when tenancy is 'host'"))
 	}
 
-	if hasHostResourceGroupArn && r.Spec.Tenancy != hostTenancy {
-		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.hostResourceGroupArn"), "hostResourceGroupArn can only be set when tenancy is 'host'"))
+	// PCP-7882: empty tenancy is allowed with hostResourceGroupArn; the controller defaults it to "host" at launch.
+	if hasHostResourceGroupArn && r.Spec.Tenancy != "" && r.Spec.Tenancy != hostTenancy {
+		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.hostResourceGroupArn"), "hostResourceGroupArn can only be set when tenancy is 'host' or unset"))
 	}
 
 	if r.Spec.HostAffinity != nil && *r.Spec.HostAffinity == hostAffinity && r.Spec.Tenancy != hostTenancy {
@@ -594,13 +595,14 @@ func (w *AWSMachine) validateHostAllocationUpdate(oldMachine, newMachine *infrav
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec"), "hostID, hostResourceGroupArn, and dynamicHostAllocation are mutually exclusive"))
 	}
 
-	// HostID, HostAffinity, HostResourceGroupArn, and DynamicHostAllocation can only be set when Tenancy is "host".
+	// hostID and dynamicHostAllocation require tenancy "host"; hostResourceGroupArn requires tenancy "host" or unset.
 	if hasHostID && newMachine.Spec.Tenancy != hostTenancy {
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.hostID"), "hostID can only be set when tenancy is 'host'"))
 	}
 
-	if hasHostResourceGroupArn && newMachine.Spec.Tenancy != hostTenancy {
-		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.hostResourceGroupArn"), "hostResourceGroupArn can only be set when tenancy is 'host'"))
+	// PCP-7882: empty tenancy is allowed with hostResourceGroupArn; the controller defaults it to "host" at launch.
+	if hasHostResourceGroupArn && newMachine.Spec.Tenancy != "" && newMachine.Spec.Tenancy != hostTenancy {
+		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec.hostResourceGroupArn"), "hostResourceGroupArn can only be set when tenancy is 'host' or unset"))
 	}
 
 	// Grandfather the hostAffinity vs tenancy check: if the old object already carried

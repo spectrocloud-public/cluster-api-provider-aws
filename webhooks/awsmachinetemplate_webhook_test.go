@@ -241,6 +241,22 @@ func TestAWSMachineTemplateValidateCreate(t *testing.T) {
 			wantError: false,
 		},
 		{
+			name: "hostResourceGroupArn with empty tenancy is valid",
+			inputTemplate: &infrav1.AWSMachineTemplate{
+				ObjectMeta: metav1.ObjectMeta{},
+				Spec: infrav1.AWSMachineTemplateSpec{
+					Template: infrav1.AWSMachineTemplateResource{
+						Spec: infrav1.AWSMachineSpec{
+							InstanceType:             "test",
+							HostResourceGroupArn:     aws.String("arn:aws:resource-groups:us-west-2:123456789012:group/test-group"),
+							LicenseConfigurationArns: []string{"arn:aws:license-manager:us-west-2:259732043995:license-configuration:lic-4acd3f7c117b9e314cce36e46084d071"},
+						},
+					},
+				},
+			},
+			wantError: false,
+		},
+		{
 			name: "hostID and hostResourceGroupArn are mutually exclusive",
 			inputTemplate: &infrav1.AWSMachineTemplate{
 				ObjectMeta: metav1.ObjectMeta{},
