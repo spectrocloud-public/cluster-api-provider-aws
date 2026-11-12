@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -29,6 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -59,6 +61,10 @@ const eksConfigKind = "EKSConfig"
 
 // NodeTypeAL2023 selects nodeadm userdata instead of the AL2 bootstrap script.
 const NodeTypeAL2023 = "al2023"
+
+// usIsoBEast1Region is the AWS Secret region whose emulated API server endpoint the
+// Sequoia emulator serves.
+const usIsoBEast1Region = "us-isob-east-1"
 
 // EKSConfigReconciler reconciles a EKSConfig object.
 type EKSConfigReconciler struct {
@@ -297,6 +303,30 @@ func (r *EKSConfigReconciler) joinAL2023Worker(ctx context.Context, cluster *clu
 		return ctrl.Result{}, err
 	}
 
+	// Check if this is a Sequoia emulator environment by reading the CAPA credentials secret.
+	isEmulator := false
+	capaSecret := &corev1.Secret{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: "capa-manager-bootstrap-credentials"}, capaSecret); err != nil {
+		if !apierrors.IsNotFound(err) {
+			log.Info("Error getting CAPA credentials secret", "error", err)
+		}
+	} else if string(capaSecret.Data["sequoia-emulator"]) == "true" {
+		isEmulator = true
+	}
+
+	apiServerEndpoint := controlPlane.Spec.ControlPlaneEndpoint.Host
+	// Emulator only: transform commercial endpoint to Secret region endpoint
+	if isEmulator {
+		transformed := transformEndpointForSecretRegion(apiServerEndpoint, controlPlane.Spec.Region)
+		if transformed != apiServerEndpoint {
+			log.Info("Transformed AL2023 API Server Endpoint for emulated Secret region",
+				"original", apiServerEndpoint,
+				"transformed", transformed,
+				"region", controlPlane.Spec.Region)
+			apiServerEndpoint = transformed
+		}
+	}
+
 	al2023Input := &userdata.AL2023Input{
 		// AWSManagedControlPlane webhooks default and validate EKSClusterName
 		ClusterName:           controlPlane.Spec.EKSClusterName,
@@ -305,7 +335,7 @@ func (r *EKSConfigReconciler) joinAL2023Worker(ctx context.Context, cluster *clu
 		PostBootstrapCommands: config.Spec.PostBootstrapCommands,
 		DNSClusterIP:          config.Spec.DNSClusterIP,
 		UseMaxPods:            config.Spec.UseMaxPods,
-		APIServerEndpoint:     controlPlane.Spec.ControlPlaneEndpoint.Host,
+		APIServerEndpoint:     apiServerEndpoint,
 		CACert:                caCert,
 		NodeGroupName:         config.Name,
 		ClusterCIDR:           r.getClusterCidr(cluster, controlPlane),
@@ -549,4 +579,25 @@ func (r *EKSConfigReconciler) updateBootstrapSecret(ctx context.Context, secret 
 		return true, r.Client.Update(ctx, secret)
 	}
 	return false, nil
+}
+
+// transformEndpointForSecretRegion transforms commercial AWS endpoint to Secret region endpoint if needed.
+// Example transformation:
+//
+//	Input:  https://XXXXX.gr7.us-east-1.eks.amazonaws.com
+//	Output: https://XXXXX.gr7.us-isob-east-1.eks.sc2s.sgov.gov
+func transformEndpointForSecretRegion(endpoint string, region string) string {
+	// Only transform for Secret region us-isob-east-1
+	if region != usIsoBEast1Region {
+		return endpoint
+	}
+
+	// Transform commercial endpoint suffix to Secret region suffix
+	// Pattern: .gr7.us-east-1.eks.amazonaws.com -> .gr7.us-isob-east-1.eks.sc2s.sgov.gov
+	if strings.Contains(endpoint, ".eks.amazonaws.com") {
+		transformed := strings.Replace(endpoint, ".gr7.us-east-1.eks.amazonaws.com", ".gr7.us-isob-east-1.eks.sc2s.sgov.gov", 1)
+		return transformed
+	}
+
+	return endpoint
 }

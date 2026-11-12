@@ -38,6 +38,7 @@ import (
 
 	infrav1 "sigs.k8s.io/cluster-api-provider-aws/v2/api/v1beta2"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/cloud"
+	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/cloud/endpoints"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/cloud/identity"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/cloud/throttle"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/pkg/logger"
@@ -74,7 +75,10 @@ func sessionForRegion(region string) (*aws.Config, throttle.ServiceLimiters, err
 		return entry.session, entry.serviceLimiters, nil
 	}
 
-	ns, err := config.LoadDefaultConfig(context.Background(), config.WithRegion(region))
+	ns, err := config.LoadDefaultConfig(context.Background(),
+		config.WithRegion(region),
+		config.WithUseFIPSEndpoint(endpoints.FIPSEndpointStateForRegion(region)),
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -126,6 +130,7 @@ func sessionForClusterWithRegion(k8sClient client.Client, clusterScoper cloud.Se
 
 	optFns := []func(*config.LoadOptions) error{
 		config.WithRegion(region),
+		config.WithUseFIPSEndpoint(endpoints.FIPSEndpointStateForRegion(region)),
 	}
 
 	if len(providers) > 0 {

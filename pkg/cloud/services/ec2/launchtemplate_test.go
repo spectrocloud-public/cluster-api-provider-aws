@@ -2277,3 +2277,79 @@ func TestDeleteLaunchTemplateVersion(t *testing.T) {
 		})
 	}
 }
+
+// TestTagsChangedShape covers PCP-7401: the tag-only fast path in ReconcileLaunchTemplate
+// consumes the created/deleted/newAnnotation return values of tagsChanged() to drive an
+// in-place UpdateResourceTags call on the LT resource. Locking down the return shape
+// here guards against a regression where somebody changes tagsChanged() semantics and
+// silently breaks the fast path (which currently has no direct unit-test coverage
+// because ReconcileLaunchTemplate needs a full LaunchTemplateScope + EC2Interface rig).
+func TestTagsChangedShape(t *testing.T) {
+	tests := []struct {
+		name           string
+		annotation     map[string]interface{}
+		desired        map[string]string
+		wantChanged    bool
+		wantCreated    map[string]string
+		wantDeleted    map[string]string
+		wantAnnotation map[string]interface{}
+	}{
+		{
+			name:           "no drift",
+			annotation:     map[string]interface{}{"env": "prod"},
+			desired:        map[string]string{"env": "prod"},
+			wantChanged:    false,
+			wantCreated:    map[string]string{},
+			wantDeleted:    map[string]string{},
+			wantAnnotation: map[string]interface{}{"env": "prod"},
+		},
+		{
+			name:           "value updated",
+			annotation:     map[string]interface{}{"env": "prod", "team": "core"},
+			desired:        map[string]string{"env": "staging", "team": "core"},
+			wantChanged:    true,
+			wantCreated:    map[string]string{"env": "staging"},
+			wantDeleted:    map[string]string{},
+			wantAnnotation: map[string]interface{}{"env": "staging", "team": "core"},
+		},
+		{
+			name:           "key added",
+			annotation:     map[string]interface{}{"env": "prod"},
+			desired:        map[string]string{"env": "prod", "cops-pipelineid": "1234"},
+			wantChanged:    true,
+			wantCreated:    map[string]string{"cops-pipelineid": "1234"},
+			wantDeleted:    map[string]string{},
+			wantAnnotation: map[string]interface{}{"env": "prod", "cops-pipelineid": "1234"},
+		},
+		{
+			name:           "key removed",
+			annotation:     map[string]interface{}{"env": "prod", "old": "1"},
+			desired:        map[string]string{"env": "prod"},
+			wantChanged:    true,
+			wantCreated:    map[string]string{},
+			wantDeleted:    map[string]string{"old": "1"},
+			wantAnnotation: map[string]interface{}{"env": "prod"},
+		},
+		{
+			name:           "mixed add + remove",
+			annotation:     map[string]interface{}{"env": "prod", "old": "1"},
+			desired:        map[string]string{"env": "prod", "new": "2"},
+			wantChanged:    true,
+			wantCreated:    map[string]string{"new": "2"},
+			wantDeleted:    map[string]string{"old": "1"},
+			wantAnnotation: map[string]interface{}{"env": "prod", "new": "2"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			changed, created, deleted, newAnnotation := tagsChanged(tc.annotation, tc.desired)
+			g.Expect(changed).To(Equal(tc.wantChanged))
+			g.Expect(created).To(Equal(tc.wantCreated))
+			g.Expect(deleted).To(Equal(tc.wantDeleted))
+			if tc.wantChanged {
+				g.Expect(newAnnotation).To(Equal(tc.wantAnnotation))
+			}
+		})
+	}
+}
