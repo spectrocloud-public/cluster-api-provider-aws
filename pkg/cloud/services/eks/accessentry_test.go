@@ -1172,7 +1172,44 @@ func TestUpdateAccessEntry(t *testing.T) {
 		accessEntry ekscontrolplanev1.AccessEntry
 		expect      func(m *mock_eksiface.MockEKSAPIMockRecorder)
 		expectError bool
+		// expectSpecGroups, when set, is the spec group order expected after the call.
+		expectSpecGroups []string
 	}{
+		{
+			name: "spec groups are not reordered",
+			accessEntry: ekscontrolplanev1.AccessEntry{
+				PrincipalARN:     principalARN,
+				Type:             ekscontrolplanev1.AccessEntryTypeStandard,
+				KubernetesGroups: []string{"viewers", "developers"},
+			},
+			expect: func(m *mock_eksiface.MockEKSAPIMockRecorder) {
+				m.DescribeAccessEntry(gomock.Any(), gomock.Any()).Return(&eks.DescribeAccessEntryOutput{
+					AccessEntry: &ekstypes.AccessEntry{
+						PrincipalArn:     aws.String(principalARN),
+						Type:             ekscontrolplanev1.AccessEntryTypeStandard.APIValue(),
+						KubernetesGroups: []string{"developers", "viewers"},
+					},
+				}, nil)
+
+				// Same groups in a different order: no update.
+				m.ListAssociatedAccessPolicies(gomock.Any(), gomock.Any()).Return(&eks.ListAssociatedAccessPoliciesOutput{
+					AssociatedAccessPolicies: []ekstypes.AssociatedAccessPolicy{},
+				}, nil)
+			},
+			expectError:      false,
+			expectSpecGroups: []string{"viewers", "developers"},
+		},
+		{
+			name: "empty describe response returns an error",
+			accessEntry: ekscontrolplanev1.AccessEntry{
+				PrincipalARN: principalARN,
+				Type:         ekscontrolplanev1.AccessEntryTypeStandard,
+			},
+			expect: func(m *mock_eksiface.MockEKSAPIMockRecorder) {
+				m.DescribeAccessEntry(gomock.Any(), gomock.Any()).Return(&eks.DescribeAccessEntryOutput{}, nil)
+			},
+			expectError: true,
+		},
 		{
 			name: "no updates needed",
 			accessEntry: ekscontrolplanev1.AccessEntry{
@@ -1306,13 +1343,69 @@ func TestUpdateAccessEntry(t *testing.T) {
 					},
 				}, nil)
 
-				// No groups in the request clears them; the username is sent so it is kept.
+				// An explicit empty list clears the groups; the username is sent so it is kept.
 				m.UpdateAccessEntry(gomock.Any(), &eks.UpdateAccessEntryInput{
-					ClusterName:  aws.String(clusterName),
-					PrincipalArn: aws.String(principalARN),
-					Username:     aws.String("admin"),
+					ClusterName:      aws.String(clusterName),
+					PrincipalArn:     aws.String(principalARN),
+					KubernetesGroups: []string{},
+					Username:         aws.String("admin"),
 				}).Return(&eks.UpdateAccessEntryOutput{}, nil)
 
+				m.ListAssociatedAccessPolicies(gomock.Any(), gomock.Any()).Return(&eks.ListAssociatedAccessPoliciesOutput{
+					AssociatedAccessPolicies: []ekstypes.AssociatedAccessPolicy{},
+				}, nil)
+			},
+			expectError: false,
+		},
+		{
+			name: "groups change keeps the existing username when the spec username is empty",
+			accessEntry: ekscontrolplanev1.AccessEntry{
+				PrincipalARN:     principalARN,
+				Type:             ekscontrolplanev1.AccessEntryTypeStandard,
+				KubernetesGroups: []string{"developers"},
+			},
+			expect: func(m *mock_eksiface.MockEKSAPIMockRecorder) {
+				m.DescribeAccessEntry(gomock.Any(), gomock.Any()).Return(&eks.DescribeAccessEntryOutput{
+					AccessEntry: &ekstypes.AccessEntry{
+						PrincipalArn:     aws.String(principalARN),
+						Type:             ekscontrolplanev1.AccessEntryTypeStandard.APIValue(),
+						Username:         aws.String("custom-user"),
+						KubernetesGroups: []string{"system:masters"},
+					},
+				}, nil)
+
+				// The existing username is sent so the groups update does not reset it.
+				m.UpdateAccessEntry(gomock.Any(), &eks.UpdateAccessEntryInput{
+					ClusterName:      aws.String(clusterName),
+					PrincipalArn:     aws.String(principalARN),
+					KubernetesGroups: []string{"developers"},
+					Username:         aws.String("custom-user"),
+				}).Return(&eks.UpdateAccessEntryOutput{}, nil)
+
+				m.ListAssociatedAccessPolicies(gomock.Any(), gomock.Any()).Return(&eks.ListAssociatedAccessPoliciesOutput{
+					AssociatedAccessPolicies: []ekstypes.AssociatedAccessPolicy{},
+				}, nil)
+			},
+			expectError: false,
+		},
+		{
+			name: "username removed from the spec keeps the existing username",
+			accessEntry: ekscontrolplanev1.AccessEntry{
+				PrincipalARN:     principalARN,
+				Type:             ekscontrolplanev1.AccessEntryTypeStandard,
+				KubernetesGroups: []string{"system:masters"},
+			},
+			expect: func(m *mock_eksiface.MockEKSAPIMockRecorder) {
+				m.DescribeAccessEntry(gomock.Any(), gomock.Any()).Return(&eks.DescribeAccessEntryOutput{
+					AccessEntry: &ekstypes.AccessEntry{
+						PrincipalArn:     aws.String(principalARN),
+						Type:             ekscontrolplanev1.AccessEntryTypeStandard.APIValue(),
+						Username:         aws.String("custom-user"),
+						KubernetesGroups: []string{"system:masters"},
+					},
+				}, nil)
+
+				// No UpdateAccessEntry call: an unset username is not drift.
 				m.ListAssociatedAccessPolicies(gomock.Any(), gomock.Any()).Return(&eks.ListAssociatedAccessPoliciesOutput{
 					AssociatedAccessPolicies: []ekstypes.AssociatedAccessPolicy{},
 				}, nil)
@@ -1481,6 +1574,9 @@ func TestUpdateAccessEntry(t *testing.T) {
 				return
 			}
 			g.Expect(err).To(BeNil())
+			if tc.expectSpecGroups != nil {
+				g.Expect(tc.accessEntry.KubernetesGroups).To(Equal(tc.expectSpecGroups))
+			}
 		})
 	}
 }

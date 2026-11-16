@@ -299,7 +299,8 @@ type AccessEntry struct {
 	KubernetesGroups []string `json:"kubernetesGroups,omitempty"`
 
 	// Username is the username for the access entry
-	// If left empty, EKS generates one and it is left unmanaged
+	// If left empty, it is not managed: EKS generates one for a new entry, and an existing
+	// entry keeps its current username
 	// +optional
 	Username string `json:"username,omitempty"`
 

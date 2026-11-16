@@ -119,6 +119,9 @@ func (s *Service) getExistingAccessEntries(ctx context.Context) (map[string]bool
 				// Skipping the entry would make a managed entry look unmanaged or missing.
 				return nil, errors.Wrapf(err, "failed to describe access entry for principal %s", principalArn)
 			}
+			if describeOutput.AccessEntry == nil {
+				return nil, errors.Errorf("empty describe response for access entry for principal %s", principalArn)
+			}
 
 			_, managed := describeOutput.AccessEntry.Tags[managedTag]
 			existingAccessEntries[principalArn] = managed
@@ -184,6 +187,9 @@ func (s *Service) updateAccessEntry(ctx context.Context, accessEntry ekscontrolp
 	if err != nil {
 		return errors.Wrapf(err, "failed to describe access entry for principal %s", accessEntry.PrincipalARN)
 	}
+	if describeOutput.AccessEntry == nil || describeOutput.AccessEntry.Type == nil {
+		return errors.Errorf("empty describe response for access entry for principal %s", accessEntry.PrincipalARN)
+	}
 
 	// Normalize empty spec Type to STANDARD to match what EKS reports for a
 	// default STANDARD entry, so an unset Type is not seen as drift.
@@ -205,12 +211,11 @@ func (s *Service) updateAccessEntry(ctx context.Context, accessEntry ekscontrolp
 		return nil
 	}
 
-	slices.Sort(accessEntry.KubernetesGroups)
-	slices.Sort(describeOutput.AccessEntry.KubernetesGroups)
+	// Compare sorted copies: sorting in place would reorder the spec.
+	groupsChanged := !slices.Equal(slices.Sorted(slices.Values(accessEntry.KubernetesGroups)),
+		slices.Sorted(slices.Values(describeOutput.AccessEntry.KubernetesGroups)))
 
-	groupsChanged := !slices.Equal(accessEntry.KubernetesGroups, describeOutput.AccessEntry.KubernetesGroups)
-
-	// An unset username means EKS generates one, so the generated value is not drift.
+	// An unset username in the spec leaves the username unmanaged, so the existing value is not drift.
 	existingUsername := ""
 	if describeOutput.AccessEntry.Username != nil {
 		existingUsername = *describeOutput.AccessEntry.Username
@@ -218,16 +223,27 @@ func (s *Service) updateAccessEntry(ctx context.Context, accessEntry ekscontrolp
 	usernameChanged := accessEntry.Username != "" && accessEntry.Username != existingUsername
 
 	if groupsChanged || usernameChanged {
-		// UpdateAccessEntry replaces both fields: an omitted kubernetesGroups clears the groups and
-		// an omitted username resets it to the EKS default. Sending only the changed field would
-		// reset the other one and the next reconcile would flip it back, so always send both.
+		// UpdateAccessEntry replaces both kubernetesGroups and username: an omitted kubernetesGroups
+		// clears the groups and an omitted username resets it to the EKS default. The API reference
+		// does not state this; it was verified against EKS on 2026-11-16 (describe-access-entry
+		// before and after update-access-entry). Send both on every update: the full group list
+		// (an explicit empty list to clear) and the spec username, or the existing one when the
+		// spec leaves it unset.
+		groups := accessEntry.KubernetesGroups
+		if len(groups) == 0 {
+			groups = []string{}
+		}
+		username := accessEntry.Username
+		if username == "" {
+			username = existingUsername
+		}
 		updateInput := &eks.UpdateAccessEntryInput{
 			ClusterName:      &clusterName,
 			PrincipalArn:     &accessEntry.PrincipalARN,
-			KubernetesGroups: accessEntry.KubernetesGroups,
+			KubernetesGroups: groups,
 		}
-		if accessEntry.Username != "" {
-			updateInput.Username = &accessEntry.Username
+		if username != "" {
+			updateInput.Username = &username
 		}
 
 		if _, err := s.EKSClient.UpdateAccessEntry(ctx, updateInput); err != nil {
