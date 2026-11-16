@@ -149,8 +149,10 @@ spec:
                               - hyperpod_linux
                               type: string
                             username:
-                              description: Username is the username for the access
-                                entry
+                              description: |-
+                                Username is the username for the access entry
+                                If left empty, it is not managed: EKS generates one for a new entry, and an existing
+                                entry keeps its current username
                               type: string
                           required:
                           - principalARN
