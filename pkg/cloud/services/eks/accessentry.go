@@ -64,10 +64,12 @@ func (s *Service) reconcileAccessEntries(ctx context.Context) error {
 			// EKS adds for bootstrapClusterCreatorAdminPermissions. Creating it would fail with
 			// ResourceInUseException on every reconcile, and updating or deleting it could remove
 			// the controller's own access, so only associate the policies it is missing.
-			// Logged at Info so users can see that the entry's type, username and
-			// Kubernetes groups from the spec are not applied.
-			s.scope.Info("Access entry exists but is not managed by CAPA, ignoring its type, username and kubernetesGroups and only associating missing access policies",
-				"principalARN", accessEntry.PrincipalARN)
+			// Logged at Info, and only when the spec sets fields that are not applied.
+			if accessEntry.Username != "" || len(accessEntry.KubernetesGroups) > 0 ||
+				(accessEntry.Type != "" && accessEntry.Type != ekscontrolplanev1.AccessEntryTypeStandard) {
+				s.scope.Info("Access entry exists but is not managed by CAPA, ignoring its type, username and kubernetesGroups and only associating missing access policies",
+					"principalARN", accessEntry.PrincipalARN)
+			}
 			if err := s.associateMissingAccessPolicies(ctx, accessEntry); err != nil {
 				return errors.Wrapf(err, "failed to associate access policies for unmanaged principal %s", accessEntry.PrincipalARN)
 			}
