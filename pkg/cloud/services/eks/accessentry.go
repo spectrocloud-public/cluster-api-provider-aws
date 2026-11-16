@@ -206,29 +206,28 @@ func (s *Service) updateAccessEntry(ctx context.Context, accessEntry ekscontrolp
 	slices.Sort(accessEntry.KubernetesGroups)
 	slices.Sort(describeOutput.AccessEntry.KubernetesGroups)
 
-	updateInput := &eks.UpdateAccessEntryInput{
-		ClusterName:  &clusterName,
-		PrincipalArn: &accessEntry.PrincipalARN,
-	}
-	needsUpdate := false
-
-	if !slices.Equal(accessEntry.KubernetesGroups, describeOutput.AccessEntry.KubernetesGroups) {
-		updateInput.KubernetesGroups = accessEntry.KubernetesGroups
-		needsUpdate = true
-	}
+	groupsChanged := !slices.Equal(accessEntry.KubernetesGroups, describeOutput.AccessEntry.KubernetesGroups)
 
 	// An unset username means EKS generates one, so the generated value is not drift.
 	existingUsername := ""
 	if describeOutput.AccessEntry.Username != nil {
 		existingUsername = *describeOutput.AccessEntry.Username
 	}
+	usernameChanged := accessEntry.Username != "" && accessEntry.Username != existingUsername
 
-	if accessEntry.Username != "" && accessEntry.Username != existingUsername {
-		updateInput.Username = &accessEntry.Username
-		needsUpdate = true
-	}
+	if groupsChanged || usernameChanged {
+		// UpdateAccessEntry replaces both fields: an omitted kubernetesGroups clears the groups and
+		// an omitted username resets it to the EKS default. Sending only the changed field would
+		// reset the other one and the next reconcile would flip it back, so always send both.
+		updateInput := &eks.UpdateAccessEntryInput{
+			ClusterName:      &clusterName,
+			PrincipalArn:     &accessEntry.PrincipalARN,
+			KubernetesGroups: accessEntry.KubernetesGroups,
+		}
+		if accessEntry.Username != "" {
+			updateInput.Username = &accessEntry.Username
+		}
 
-	if needsUpdate {
 		if _, err := s.EKSClient.UpdateAccessEntry(ctx, updateInput); err != nil {
 			return errors.Wrapf(err, "failed to update access entry for principal %s", accessEntry.PrincipalARN)
 		}

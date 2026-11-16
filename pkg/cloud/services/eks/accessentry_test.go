@@ -1243,10 +1243,12 @@ func TestUpdateAccessEntry(t *testing.T) {
 					},
 				}, nil)
 
+				// The unchanged groups are sent too: an omitted kubernetesGroups would clear them.
 				m.UpdateAccessEntry(gomock.Any(), &eks.UpdateAccessEntryInput{
-					ClusterName:  aws.String(clusterName),
-					PrincipalArn: aws.String(principalARN),
-					Username:     aws.String("new-admin"),
+					ClusterName:      aws.String(clusterName),
+					PrincipalArn:     aws.String(principalARN),
+					KubernetesGroups: []string{"system:masters"},
+					Username:         aws.String("new-admin"),
 				}).Return(&eks.UpdateAccessEntryOutput{}, nil)
 
 				m.ListAssociatedAccessPolicies(gomock.Any(), gomock.Any()).Return(&eks.ListAssociatedAccessPoliciesOutput{
@@ -1273,10 +1275,42 @@ func TestUpdateAccessEntry(t *testing.T) {
 					},
 				}, nil)
 
+				// The unchanged username is sent too: an omitted username would reset it to the EKS default.
 				m.UpdateAccessEntry(gomock.Any(), &eks.UpdateAccessEntryInput{
 					ClusterName:      aws.String(clusterName),
 					PrincipalArn:     aws.String(principalARN),
 					KubernetesGroups: []string{"developers"},
+					Username:         aws.String("admin"),
+				}).Return(&eks.UpdateAccessEntryOutput{}, nil)
+
+				m.ListAssociatedAccessPolicies(gomock.Any(), gomock.Any()).Return(&eks.ListAssociatedAccessPoliciesOutput{
+					AssociatedAccessPolicies: []ekstypes.AssociatedAccessPolicy{},
+				}, nil)
+			},
+			expectError: false,
+		},
+		{
+			name: "removing all groups keeps the username",
+			accessEntry: ekscontrolplanev1.AccessEntry{
+				PrincipalARN: principalARN,
+				Type:         ekscontrolplanev1.AccessEntryTypeStandard,
+				Username:     "admin",
+			},
+			expect: func(m *mock_eksiface.MockEKSAPIMockRecorder) {
+				m.DescribeAccessEntry(gomock.Any(), gomock.Any()).Return(&eks.DescribeAccessEntryOutput{
+					AccessEntry: &ekstypes.AccessEntry{
+						PrincipalArn:     aws.String(principalARN),
+						Type:             ekscontrolplanev1.AccessEntryTypeStandard.APIValue(),
+						Username:         aws.String("admin"),
+						KubernetesGroups: []string{"system:masters"},
+					},
+				}, nil)
+
+				// No groups in the request clears them; the username is sent so it is kept.
+				m.UpdateAccessEntry(gomock.Any(), &eks.UpdateAccessEntryInput{
+					ClusterName:  aws.String(clusterName),
+					PrincipalArn: aws.String(principalARN),
+					Username:     aws.String("admin"),
 				}).Return(&eks.UpdateAccessEntryOutput{}, nil)
 
 				m.ListAssociatedAccessPolicies(gomock.Any(), gomock.Any()).Return(&eks.ListAssociatedAccessPoliciesOutput{
@@ -1328,9 +1362,10 @@ func TestUpdateAccessEntry(t *testing.T) {
 				}, nil)
 
 				m.UpdateAccessEntry(gomock.Any(), &eks.UpdateAccessEntryInput{
-					ClusterName:  aws.String(clusterName),
-					PrincipalArn: aws.String(principalARN),
-					Username:     aws.String("admin"),
+					ClusterName:      aws.String(clusterName),
+					PrincipalArn:     aws.String(principalARN),
+					KubernetesGroups: []string{"system:masters"},
+					Username:         aws.String("admin"),
 				}).Return(&eks.UpdateAccessEntryOutput{}, nil)
 
 				m.ListAssociatedAccessPolicies(gomock.Any(), gomock.Any()).Return(&eks.ListAssociatedAccessPoliciesOutput{
