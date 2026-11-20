@@ -54,6 +54,18 @@ var (
 	}
 )
 
+// authorizeForGroup matches an AuthorizeSecurityGroupIngress call for one security group.
+type authorizeForGroup string
+
+func (g authorizeForGroup) Matches(x interface{}) bool {
+	input, ok := x.(*ec2.AuthorizeSecurityGroupIngressInput)
+	return ok && aws.ToString(input.GroupId) == string(g)
+}
+
+func (g authorizeForGroup) String() string {
+	return "authorizes ingress for group " + string(g)
+}
+
 func TestReconcileSecurityGroups(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
@@ -66,8 +78,20 @@ func TestReconcileSecurityGroups(t *testing.T) {
 		awsCluster func(acl infrav1.AWSCluster) infrav1.AWSCluster
 	}{
 		{
-			name: "no existing",
+			name: "no existing, custom LB rule repeats a NAT gateway permission",
 			awsCluster: func(acl infrav1.AWSCluster) infrav1.AWSCluster {
+				acl.Status.Network.NatGatewaysIPs = []string{"10.0.0.10", "10.0.0.11"}
+				acl.Spec.ControlPlaneLoadBalancer = &infrav1.AWSLoadBalancerSpec{
+					IngressRules: []infrav1.IngressRule{
+						{
+							Description: "custom rule repeating a NAT gateway permission",
+							Protocol:    infrav1.SecurityGroupProtocolTCP,
+							FromPort:    infrav1.DefaultAPIServerPort,
+							ToPort:      infrav1.DefaultAPIServerPort,
+							CidrBlocks:  []string{"10.0.0.10/32"},
+						},
+					},
+				}
 				return acl
 			},
 			input: &infrav1.NetworkSpec{
@@ -146,9 +170,10 @@ func TestReconcileSecurityGroups(t *testing.T) {
 				})).
 					Return(&ec2.CreateSecurityGroupOutput{GroupId: aws.String("sg-bastion")}, nil)
 
-				m.AuthorizeSecurityGroupIngress(context.TODO(), gomock.AssignableToTypeOf(&ec2.AuthorizeSecurityGroupIngressInput{
-					GroupId: aws.String("sg-bastion"),
-				})).
+				// gomock matches calls in declaration order and AssignableToTypeOf ignores the
+				// values, so a loose matcher declared before the exact apiserver-lb expectation
+				// below swallows its call whenever the role map iterates in an unlucky order.
+				m.AuthorizeSecurityGroupIngress(context.TODO(), authorizeForGroup("sg-bastion")).
 					Return(&ec2.AuthorizeSecurityGroupIngressOutput{}, nil).
 					After(securityGroupBastion)
 
@@ -178,8 +203,32 @@ func TestReconcileSecurityGroups(t *testing.T) {
 				})).
 					Return(&ec2.CreateSecurityGroupOutput{GroupId: aws.String("sg-apiserver-lb")}, nil)
 
-				m.AuthorizeSecurityGroupIngress(context.TODO(), gomock.AssignableToTypeOf(&ec2.AuthorizeSecurityGroupIngressInput{
+				m.AuthorizeSecurityGroupIngress(context.TODO(), gomock.Eq(&ec2.AuthorizeSecurityGroupIngressInput{
 					GroupId: aws.String("sg-apiserver-lb"),
+					IpPermissions: []types.IpPermission{
+						{
+							IpProtocol: aws.String("tcp"),
+							FromPort:   aws.Int32(6443),
+							ToPort:     aws.Int32(6443),
+							IpRanges: []types.IpRange{
+								{
+									CidrIp:      aws.String("10.0.0.10/32"),
+									Description: aws.String("Kubernetes API"),
+								},
+							},
+						},
+						{
+							IpProtocol: aws.String("tcp"),
+							FromPort:   aws.Int32(6443),
+							ToPort:     aws.Int32(6443),
+							IpRanges: []types.IpRange{
+								{
+									CidrIp:      aws.String("10.0.0.11/32"),
+									Description: aws.String("Kubernetes API"),
+								},
+							},
+						},
+					},
 				})).
 					Return(&ec2.AuthorizeSecurityGroupIngressOutput{}, nil).
 					After(securityGroupAPIServerLb)
@@ -1574,6 +1623,195 @@ func TestAdditionalManagedControlPlaneSecurityGroup(t *testing.T) {
 	}
 }
 
+// An EKS control plane only has the node-eks-additional and node (and bastion) security groups.
+// There is no control plane group, so rules for this role must not go through
+// processIngressRulesSGs: it would resolve a sourceless rule or a controlplane role to an empty
+// group ID and fail on NatGatewaysIPsSource while the NAT gateway IPs are not known yet.
+func TestAdditionalManagedControlPlaneEKSNodeSecurityGroup(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = ekscontrolplanev1.AddToScheme(scheme)
+
+	rules := []infrav1.IngressRule{
+		{
+			Description:              "from node role",
+			Protocol:                 infrav1.SecurityGroupProtocolTCP,
+			FromPort:                 9345,
+			ToPort:                   9345,
+			SourceSecurityGroupRoles: []infrav1.SecurityGroupRole{infrav1.SecurityGroupNode},
+		},
+		{
+			Description:          "from nat gateways",
+			Protocol:             infrav1.SecurityGroupProtocolTCP,
+			FromPort:             9346,
+			ToPort:               9346,
+			NatGatewaysIPsSource: true,
+			CidrBlocks:           []string{"10.1.0.0/16"},
+		},
+		{
+			Description: "no source",
+			Protocol:    infrav1.SecurityGroupProtocolTCP,
+			FromPort:    9347,
+			ToPort:      9347,
+		},
+		{
+			Description:              "from the control plane role that EKS does not have",
+			Protocol:                 infrav1.SecurityGroupProtocolTCP,
+			FromPort:                 9348,
+			ToPort:                   9348,
+			SourceSecurityGroupRoles: []infrav1.SecurityGroupRole{infrav1.SecurityGroupControlPlane},
+		},
+	}
+
+	cs, err := scope.NewManagedControlPlaneScope(scope.ManagedControlPlaneScopeParams{
+		Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		Cluster: &clusterv1.Cluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+		},
+		ControlPlane: &ekscontrolplanev1.AWSManagedControlPlane{
+			Spec: ekscontrolplanev1.AWSManagedControlPlaneSpec{
+				NetworkSpec: infrav1.NetworkSpec{AdditionalControlPlaneIngressRules: rules},
+			},
+			Status: ekscontrolplanev1.AWSManagedControlPlaneStatus{
+				Network: infrav1.NetworkStatus{
+					SecurityGroups: map[infrav1.SecurityGroupRole]infrav1.SecurityGroup{
+						infrav1.SecurityGroupNode: {ID: "node-sg-id"},
+					},
+					// No NAT gateway IPs yet.
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create test context: %v", err)
+	}
+
+	g := NewGomegaWithT(t)
+	s := NewService(cs, []infrav1.SecurityGroupRole{infrav1.SecurityGroupEKSNodeAdditional})
+
+	got, err := s.getSecurityGroupIngressRules(infrav1.SecurityGroupEKSNodeAdditional)
+	g.Expect(err).NotTo(HaveOccurred(), "NatGatewaysIPsSource must not block this role while NAT IPs are unknown")
+	g.Expect(got).To(Equal(infrav1.IngressRules(rules)), "rules for this role pass through unchanged")
+
+	for _, rule := range got {
+		g.Expect(rule.SourceSecurityGroupIDs).NotTo(ContainElement(""), "an empty security group ID must never be produced")
+	}
+}
+
+func TestAdditionalIngressRulesAreDeduped(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = infrav1.AddToScheme(scheme)
+
+	cs, err := scope.NewClusterScope(scope.ClusterScopeParams{
+		Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		Cluster: &clusterv1.Cluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+		},
+		AWSCluster: &infrav1.AWSCluster{
+			Spec: infrav1.AWSClusterSpec{
+				NetworkSpec: infrav1.NetworkSpec{
+					AdditionalControlPlaneIngressRules: []infrav1.IngressRule{
+						{
+							Description:              "control plane from node role",
+							Protocol:                 infrav1.SecurityGroupProtocolTCP,
+							FromPort:                 9345,
+							ToPort:                   9345,
+							SourceSecurityGroupRoles: []infrav1.SecurityGroupRole{infrav1.SecurityGroupNode},
+						},
+						{
+							Description:            "control plane from node security group",
+							Protocol:               infrav1.SecurityGroupProtocolTCP,
+							FromPort:               9345,
+							ToPort:                 9345,
+							SourceSecurityGroupIDs: []string{"node-sg-id"},
+						},
+					},
+					AdditionalNodeIngressRules: []infrav1.IngressRule{
+						{
+							Description:              "node from control plane role",
+							Protocol:                 infrav1.SecurityGroupProtocolTCP,
+							FromPort:                 9346,
+							ToPort:                   9346,
+							SourceSecurityGroupRoles: []infrav1.SecurityGroupRole{infrav1.SecurityGroupControlPlane},
+						},
+						{
+							Description:            "node from control plane security group",
+							Protocol:               infrav1.SecurityGroupProtocolTCP,
+							FromPort:               9346,
+							ToPort:                 9346,
+							SourceSecurityGroupIDs: []string{"cp-sg-id"},
+						},
+					},
+				},
+			},
+			Status: infrav1.AWSClusterStatus{
+				Network: infrav1.NetworkStatus{
+					SecurityGroups: map[infrav1.SecurityGroupRole]infrav1.SecurityGroup{
+						infrav1.SecurityGroupAPIServerLB: {
+							ID: "apiserver-lb-sg-id",
+						},
+						infrav1.SecurityGroupControlPlane: {
+							ID: "cp-sg-id",
+						},
+						infrav1.SecurityGroupNode: {
+							ID: "node-sg-id",
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create test context: %v", err)
+	}
+
+	s := NewService(cs, testSecurityGroupRoles)
+
+	tests := []struct {
+		name     string
+		role     infrav1.SecurityGroupRole
+		fromPort int64
+	}{
+		{
+			name:     "control plane additional ingress rules",
+			role:     infrav1.SecurityGroupControlPlane,
+			fromPort: 9345,
+		},
+		{
+			name:     "node additional ingress rules",
+			role:     infrav1.SecurityGroupNode,
+			fromPort: 9346,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+
+			rules, err := s.getSecurityGroupIngressRules(tc.role)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			deduped := dedupeByPermission(expandIngressRules(rules))
+
+			permissionCount := 0
+			for _, rule := range deduped {
+				if rule.FromPort != tc.fromPort {
+					continue
+				}
+				permissionCount++
+			}
+			g.Expect(permissionCount).To(Equal(1), "expected the duplicated additional rule to collapse to one permission")
+
+			keys := map[string]int{}
+			for _, rule := range deduped {
+				keys[permissionKey(rule)]++
+			}
+			for key, count := range keys {
+				g.Expect(count).To(Equal(1), "permission %q would be authorized more than once", key)
+			}
+		})
+	}
+}
+
 func TestControlPlaneLoadBalancerIngressRules(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = infrav1.AddToScheme(scheme)
@@ -1892,6 +2130,74 @@ func TestControlPlaneLoadBalancerIngressRules(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "custom rule repeating the kubelet rule is filtered by AWS identity",
+			awsCluster: &infrav1.AWSCluster{
+				Spec: infrav1.AWSClusterSpec{
+					ControlPlaneLoadBalancer: &infrav1.AWSLoadBalancerSpec{
+						IngressRules: []infrav1.IngressRule{
+							{
+								Description: "VPC access",
+								Protocol:    infrav1.SecurityGroupProtocolTCP,
+								FromPort:    6443,
+								ToPort:      6443,
+								CidrBlocks:  []string{"10.0.0.0/16"},
+							},
+						},
+						Scheme: &infrav1.ELBSchemeInternal,
+					},
+					NetworkSpec: infrav1.NetworkSpec{
+						VPC: infrav1.VPCSpec{
+							CidrBlock: "10.0.0.0/16",
+						},
+					},
+				},
+			},
+			expectedIngresRules: infrav1.IngressRules{
+				infrav1.IngressRule{
+					Description: "Kubernetes API",
+					Protocol:    infrav1.SecurityGroupProtocolTCP,
+					FromPort:    6443,
+					ToPort:      6443,
+					CidrBlocks:  []string{"10.0.0.0/16"},
+				},
+			},
+		},
+		{
+			name: "secondary control plane LB custom rule repeating the kubelet rule is filtered",
+			awsCluster: &infrav1.AWSCluster{
+				Spec: infrav1.AWSClusterSpec{
+					ControlPlaneLoadBalancer: &infrav1.AWSLoadBalancerSpec{
+						Scheme: &infrav1.ELBSchemeInternal,
+					},
+					SecondaryControlPlaneLoadBalancer: &infrav1.AWSLoadBalancerSpec{
+						IngressRules: []infrav1.IngressRule{
+							{
+								Description: "VPC access",
+								Protocol:    infrav1.SecurityGroupProtocolTCP,
+								FromPort:    6443,
+								ToPort:      6443,
+								CidrBlocks:  []string{"10.0.0.0/16"},
+							},
+						},
+					},
+					NetworkSpec: infrav1.NetworkSpec{
+						VPC: infrav1.VPCSpec{
+							CidrBlock: "10.0.0.0/16",
+						},
+					},
+				},
+			},
+			expectedIngresRules: infrav1.IngressRules{
+				infrav1.IngressRule{
+					Description: "Kubernetes API",
+					Protocol:    infrav1.SecurityGroupProtocolTCP,
+					FromPort:    6443,
+					ToPort:      6443,
+					CidrBlocks:  []string{"10.0.0.0/16"},
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -1917,6 +2223,257 @@ func TestControlPlaneLoadBalancerIngressRules(t *testing.T) {
 			g.Expect(rules).To(Equal(tc.expectedIngresRules))
 		})
 	}
+}
+
+func TestExpandAndDedupeIngressRules(t *testing.T) {
+	tests := []struct {
+		name  string
+		rules infrav1.IngressRules
+		want  int
+	}{
+		{
+			name: "node port services deduplicate repeated CIDRs",
+			rules: infrav1.IngressRules{
+				{
+					Description: "Node Port Services",
+					Protocol:    infrav1.SecurityGroupProtocolTCP,
+					FromPort:    30000,
+					ToPort:      32767,
+					CidrBlocks:  []string{"10.0.0.0/16", "10.0.0.0/16"},
+				},
+			},
+			want: 1,
+		},
+		{
+			name: "kubelet API deduplicates repeated source security groups",
+			rules: infrav1.IngressRules{
+				{
+					Description:            "Kubelet API",
+					Protocol:               infrav1.SecurityGroupProtocolTCP,
+					FromPort:               10250,
+					ToPort:                 10250,
+					SourceSecurityGroupIDs: []string{"sg-controlplane", "sg-controlplane"},
+				},
+			},
+			want: 1,
+		},
+		{
+			name: "bastion SSH deduplicates repeated CIDRs",
+			rules: infrav1.IngressRules{
+				{
+					Description: "SSH",
+					Protocol:    infrav1.SecurityGroupProtocolTCP,
+					FromPort:    22,
+					ToPort:      22,
+					CidrBlocks:  []string{"10.0.0.0/16", "10.0.0.0/16"},
+				},
+			},
+			want: 1,
+		},
+		{
+			name: "load balancer listeners deduplicate repeated rules",
+			rules: infrav1.IngressRules{
+				{
+					Description: "listener",
+					Protocol:    infrav1.SecurityGroupProtocolTCP,
+					FromPort:    443,
+					ToPort:      443,
+					CidrBlocks:  []string{"0.0.0.0/0"},
+				},
+				{
+					Description: "listener duplicate",
+					Protocol:    infrav1.SecurityGroupProtocolTCP,
+					FromPort:    443,
+					ToPort:      443,
+					CidrBlocks:  []string{"0.0.0.0/0"},
+				},
+			},
+			want: 1,
+		},
+		{
+			name: "description-only changes collapse across rules",
+			rules: infrav1.IngressRules{
+				{
+					Description:            "etcd",
+					Protocol:               infrav1.SecurityGroupProtocolTCP,
+					FromPort:               2379,
+					ToPort:                 2379,
+					SourceSecurityGroupIDs: []string{"sg-controlplane"},
+				},
+				{
+					Description:            "etcd from another rule",
+					Protocol:               infrav1.SecurityGroupProtocolTCP,
+					FromPort:               2379,
+					ToPort:                 2379,
+					SourceSecurityGroupIDs: []string{"sg-controlplane"},
+				},
+			},
+			want: 1,
+		},
+		{
+			name: "distinct rules are preserved",
+			rules: infrav1.IngressRules{
+				{
+					Description:            "kubelet API from controlplane",
+					Protocol:               infrav1.SecurityGroupProtocolTCP,
+					FromPort:               10250,
+					ToPort:                 10250,
+					SourceSecurityGroupIDs: []string{"sg-controlplane"},
+				},
+				{
+					Description:            "kubelet API from node",
+					Protocol:               infrav1.SecurityGroupProtocolTCP,
+					FromPort:               10250,
+					ToPort:                 10250,
+					SourceSecurityGroupIDs: []string{"sg-node"},
+				},
+				{
+					Description: "Node Port Services",
+					Protocol:    infrav1.SecurityGroupProtocolTCP,
+					FromPort:    30000,
+					ToPort:      32767,
+					CidrBlocks:  []string{"10.0.0.0/16"},
+				},
+			},
+			want: 3,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			got := dedupeByPermission(expandIngressRules(tc.rules))
+			g.Expect(got).To(HaveLen(tc.want))
+		})
+	}
+}
+
+func TestPermissionDiffProducesUniqueAuthorization(t *testing.T) {
+	kubeletRule := infrav1.IngressRule{
+		Description: "Kubernetes API",
+		Protocol:    infrav1.SecurityGroupProtocolTCP,
+		FromPort:    6443,
+		ToPort:      6443,
+		CidrBlocks:  []string{"0.0.0.0/0"},
+	}
+	customDuplicate := kubeletRule
+	customDuplicate.Description = "custom rule for the same permission"
+
+	sshRule := infrav1.IngressRule{
+		Description: "SSH",
+		Protocol:    infrav1.SecurityGroupProtocolTCP,
+		FromPort:    22,
+		ToPort:      22,
+		CidrBlocks:  []string{"0.0.0.0/0"},
+	}
+
+	tests := []struct {
+		name          string
+		current       infrav1.IngressRules
+		specRules     infrav1.IngressRules
+		wantRevoke    int
+		wantAuthorize int
+	}{
+		{
+			name:          "duplicate desired rules authorize a single permission",
+			specRules:     infrav1.IngressRules{kubeletRule, customDuplicate},
+			wantAuthorize: 1,
+		},
+		{
+			name:      "description-only drift revokes and authorizes nothing",
+			current:   infrav1.IngressRules{kubeletRule},
+			specRules: infrav1.IngressRules{customDuplicate},
+		},
+		{
+			name:          "an additional permission is authorized alone",
+			current:       infrav1.IngressRules{kubeletRule},
+			specRules:     infrav1.IngressRules{kubeletRule, customDuplicate, sshRule},
+			wantAuthorize: 1,
+		},
+		{
+			name:       "a superseded permission is revoked alone",
+			current:    infrav1.IngressRules{kubeletRule, sshRule},
+			specRules:  infrav1.IngressRules{kubeletRule, customDuplicate},
+			wantRevoke: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+
+			want := dedupeByPermission(expandIngressRules(tc.specRules))
+			toRevoke := differenceByPermission(tc.current, want)
+			toAuthorize := differenceByPermission(want, tc.current)
+
+			g.Expect(toRevoke).To(HaveLen(tc.wantRevoke))
+			g.Expect(toAuthorize).To(HaveLen(tc.wantAuthorize))
+
+			keys := sets.New[string]()
+			for _, rule := range toAuthorize {
+				key := permissionKey(rule)
+				g.Expect(keys.Has(key)).To(BeFalse(), "permission %q would be authorized more than once", key)
+				keys.Insert(key)
+			}
+		})
+	}
+
+	t.Run("authorize call carries one permission per AWS identity", func(t *testing.T) {
+		mockCtrl := gomock.NewController(t)
+
+		scheme := runtime.NewScheme()
+		_ = infrav1.AddToScheme(scheme)
+
+		cs, err := scope.NewClusterScope(scope.ClusterScopeParams{
+			Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+			Cluster: &clusterv1.Cluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+			},
+			AWSCluster: &infrav1.AWSCluster{
+				Spec: infrav1.AWSClusterSpec{
+					NetworkSpec: infrav1.NetworkSpec{
+						VPC: infrav1.VPCSpec{
+							ID:        "vpc-securitygroups",
+							CidrBlock: "10.0.0.0/16",
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Failed to create test context: %v", err)
+		}
+
+		ec2Mock := mocks.NewMockEC2API(mockCtrl)
+		ec2Mock.EXPECT().
+			AuthorizeSecurityGroupIngress(context.TODO(), gomock.Eq(&ec2.AuthorizeSecurityGroupIngressInput{
+				GroupId: aws.String("sg-apiserver-lb"),
+				IpPermissions: []types.IpPermission{
+					{
+						IpProtocol: aws.String("tcp"),
+						FromPort:   aws.Int32(6443),
+						ToPort:     aws.Int32(6443),
+						IpRanges: []types.IpRange{
+							{
+								CidrIp:      aws.String("0.0.0.0/0"),
+								Description: aws.String("Kubernetes API"),
+							},
+						},
+					},
+				},
+			})).
+			Return(&ec2.AuthorizeSecurityGroupIngressOutput{}, nil).
+			Times(1)
+
+		s := NewService(cs, testSecurityGroupRoles)
+		s.EC2Client = ec2Mock
+
+		want := dedupeByPermission(expandIngressRules(infrav1.IngressRules{kubeletRule, customDuplicate}))
+		toAuthorize := differenceByPermission(want, nil)
+		if err := s.authorizeSecurityGroupIngressRules("sg-apiserver-lb", toAuthorize); err != nil {
+			t.Fatalf("Failed to authorize security group ingress rules: %v", err)
+		}
+	})
 }
 
 func TestDeleteSecurityGroups(t *testing.T) {
