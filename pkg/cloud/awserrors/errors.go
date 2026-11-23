@@ -48,6 +48,7 @@ const (
 	//nolint:gosec
 	NoCredentialProviders                   = "NoCredentialProviders"
 	NoSuchKey                               = "NoSuchKey"
+	PermissionDuplicate                     = "InvalidPermission.Duplicate"
 	PermissionNotFound                      = "InvalidPermission.NotFound"
 	ResourceExists                          = "ResourceExistsException"
 	ResourceNotFound                        = "InvalidResourceID.NotFound"
@@ -217,6 +218,14 @@ func IsIgnorableSecurityGroupError(err error) error {
 		}
 	}
 	return nil
+}
+
+// IsPermissionDuplicateError returns whether the error is InvalidPermission.Duplicate.
+func IsPermissionDuplicateError(err error) bool {
+	if code, ok := Code(err); ok {
+		return code == PermissionDuplicate
+	}
+	return false
 }
 
 // IsPermissionNotFoundError returns whether the error is InvalidPermission.NotFound.

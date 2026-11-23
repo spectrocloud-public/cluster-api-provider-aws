@@ -167,9 +167,32 @@ func (s *Service) ReconcileSecurityGroups() error {
 			return err
 		}
 		// Duplicate rules with multiple cidr blocks/source security groups so that we are comparing similar sets.
-		want := expandIngressRules(specRules)
+		// Deduplicate by AWS permission identity so a rule that repeats a CAPA-owned rule with a
+		// different description is not authorized twice. AWS ignores descriptions.
+		want := dedupeByPermission(expandIngressRules(specRules))
 
-		toRevoke := current.Difference(want)
+		toRevoke := differenceByPermission(current, want)
+		toAuthorize := differenceByPermission(want, current)
+		// AWS keeps the description per permission and the same permission cannot be authorized
+		// twice, so the permissions that only differ in description are handled separately below.
+		drifted := descriptionDrift(want, current)
+
+		// Authorize first. If this fails nothing has been removed yet, so the group never ends up
+		// with fewer permissions than it started with and a persistently failing authorize does
+		// not touch live rules on every requeue.
+		if len(toAuthorize) > 0 {
+			if err := wait.WaitForWithRetryable(wait.NewBackoff(), func() (bool, error) {
+				if err := s.authorizeSecurityGroupIngressRules(sg.ID, toAuthorize); err != nil {
+					return false, err
+				}
+				return true, nil
+			}, awserrors.GroupNotFound); err != nil {
+				return err
+			}
+
+			s.scope.Debug("Authorized ingress rules in security group", "authorized-ingress-rules", toAuthorize, "security-group-id", sg.ID)
+		}
+
 		if len(toRevoke) > 0 {
 			if err := wait.WaitForWithRetryable(wait.NewBackoff(), func() (bool, error) {
 				if err := s.revokeSecurityGroupIngressRules(sg.ID, toRevoke); err != nil {
@@ -183,18 +206,10 @@ func (s *Service) ReconcileSecurityGroups() error {
 			s.scope.Debug("Revoked ingress rules from security group", "revoked-ingress-rules", toRevoke, "security-group-id", sg.ID)
 		}
 
-		toAuthorize := want.Difference(current)
-		if len(toAuthorize) > 0 {
-			if err := wait.WaitForWithRetryable(wait.NewBackoff(), func() (bool, error) {
-				if err := s.authorizeSecurityGroupIngressRules(sg.ID, toAuthorize); err != nil {
-					return false, err
-				}
-				return true, nil
-			}, awserrors.GroupNotFound); err != nil {
+		if len(drifted) > 0 {
+			if err := s.replaceIngressRuleDescriptions(sg.ID, drifted); err != nil {
 				return err
 			}
-
-			s.scope.Debug("Authorized ingress rules in security group", "authorized-ingress-rules", toAuthorize, "security-group-id", sg.ID)
 		}
 	}
 	v1beta1conditions.MarkTrue(s.scope.InfraCluster(), infrav1.ClusterSecurityGroupsReadyCondition)
@@ -496,18 +511,111 @@ func (s *Service) createSecurityGroup(role infrav1.SecurityGroupRole, input *typ
 }
 
 func (s *Service) authorizeSecurityGroupIngressRules(id string, rules infrav1.IngressRules) error {
+	accepted := rules
+	err := s.authorizePermissions(id, rules)
+	if err != nil && awserrors.IsPermissionDuplicateError(errors.Cause(err)) {
+		// AWS rejects the whole batch when any permission already exists, for example when the
+		// observed rules were stale. Retry one permission at a time and ignore the ones AWS holds.
+		s.scope.Debug("Authorize batch hit an existing permission, retrying one at a time", "security-group-id", id, "error", err.Error())
+		err = nil
+		accepted = nil
+		for i := range rules {
+			one := rules[i : i+1]
+			oneErr := s.authorizePermissions(id, one)
+			if oneErr == nil {
+				accepted = append(accepted, one...)
+				continue
+			}
+			if awserrors.IsPermissionDuplicateError(errors.Cause(oneErr)) {
+				s.scope.Debug("Ingress permission already exists", "security-group-id", id, "rule", one)
+				continue
+			}
+			err = oneErr
+			break
+		}
+	}
+	if err != nil {
+		record.Warnf(s.scope.InfraCluster(), "FailedAuthorizeSecurityGroupIngressRules", "Failed to authorize security group ingress rules %v for SecurityGroup %q: %v", rules, id, err)
+		return errors.Wrapf(err, "failed to authorize security group %q ingress rules: %v", id, rules)
+	}
+
+	// Only report what AWS accepted, so permissions that already existed do not show up as
+	// authorized on every reconcile.
+	if len(accepted) > 0 {
+		record.Eventf(s.scope.InfraCluster(), "SuccessfulAuthorizeSecurityGroupIngressRules", "Authorized security group ingress rules %v for SecurityGroup %q", accepted, id)
+	}
+	return nil
+}
+
+// authorizePermissions makes one AuthorizeSecurityGroupIngress call and reports nothing.
+func (s *Service) authorizePermissions(id string, rules infrav1.IngressRules) error {
 	input := &ec2.AuthorizeSecurityGroupIngressInput{GroupId: aws.String(id)}
 	for i := range rules {
 		rule := rules[i]
 		input.IpPermissions = append(input.IpPermissions, *ingressRuleToSDKType(s.scope, &rule))
 	}
-	if _, err := s.EC2Client.AuthorizeSecurityGroupIngress(context.TODO(), input); err != nil {
-		record.Warnf(s.scope.InfraCluster(), "FailedAuthorizeSecurityGroupIngressRules", "Failed to authorize security group ingress rules %v for SecurityGroup %q: %v", rules, id, err)
-		return errors.Wrapf(err, "failed to authorize security group %q ingress rules: %v", id, rules)
+	_, err := s.EC2Client.AuthorizeSecurityGroupIngress(context.TODO(), input)
+	return err
+}
+
+// replaceIngressRuleDescriptions changes the description of permissions AWS already holds.
+// The only in-place API needs ec2:UpdateSecurityGroupRuleDescriptionsIngress, which CAPA's IAM
+// policy does not grant, so the permission is revoked and authorized again. It is done on its
+// own, apart from the stale rule revoke, so that an already gone rule elsewhere cannot hide a
+// failed revoke here, and so a failed authorize only has to put back these permissions.
+func (s *Service) replaceIngressRuleDescriptions(id string, rules infrav1.IngressRules) error {
+	// AWS matches a revoke that names a description only against a rule holding that exact
+	// description. The rules here carry the NEW description, so the stored one would never match,
+	// AWS would answer InvalidPermission.NotFound, and that is treated as already gone. The rule
+	// would then stay as it is while the authorize below hits a duplicate. Revoke by permission
+	// identity instead, which AWS accepts when the description is left out.
+	identity := make(infrav1.IngressRules, len(rules))
+	for i := range rules {
+		identity[i] = rules[i]
+		identity[i].Description = ""
 	}
 
-	record.Eventf(s.scope.InfraCluster(), "SuccessfulAuthorizeSecurityGroupIngressRules", "Authorized security group ingress rules %v for SecurityGroup %q", rules, id)
+	if err := wait.WaitForWithRetryable(wait.NewBackoff(), func() (bool, error) {
+		if err := s.revokeSecurityGroupIngressRules(id, identity); err != nil {
+			return false, err
+		}
+		return true, nil
+	}, awserrors.GroupNotFound); err != nil {
+		return errors.Wrapf(err, "failed to revoke security group ingress rules for %q before updating their description", id)
+	}
+
+	if err := wait.WaitForWithRetryable(wait.NewBackoff(), func() (bool, error) {
+		if err := s.authorizeSecurityGroupIngressRules(id, rules); err != nil {
+			return false, err
+		}
+		return true, nil
+	}, awserrors.GroupNotFound); err != nil {
+		// The permissions were just revoked. Put them back one at a time, so a single bad rule or a
+		// throttled call does not keep the others missing until the next reconcile. The original
+		// error is still returned.
+		s.restoreIngressRules(id, rules)
+		return err
+	}
+
+	s.scope.Debug("Updated ingress rule descriptions", "rules", rules, "security-group-id", id)
 	return nil
+}
+
+// restoreIngressRules authorizes each permission on its own after a failed description update.
+// A permission AWS already holds is fine. Failures are logged once, without further events,
+// because the caller returns the original error.
+func (s *Service) restoreIngressRules(id string, rules infrav1.IngressRules) {
+	var failed []string
+	for i := range rules {
+		one := rules[i : i+1]
+		err := s.authorizePermissions(id, one)
+		if err != nil && !awserrors.IsPermissionDuplicateError(errors.Cause(err)) {
+			failed = append(failed, fmt.Sprintf("%v: %v", one, err))
+		}
+	}
+	if len(failed) > 0 {
+		s.scope.Error(errors.New(strings.Join(failed, "; ")), "failed to restore ingress rules after a failed description update", "security-group-id", id)
+	}
 }
 
 func (s *Service) revokeSecurityGroupIngressRules(id string, rules infrav1.IngressRules) error {
@@ -711,8 +819,8 @@ func (s *Service) getSecurityGroupIngressRules(role infrav1.SecurityGroupRole) (
 		if err != nil {
 			return nil, err
 		}
-		rulesToApply := customIngressRules.Difference(kubeletRules)
-		return append(kubeletRules, rulesToApply...), nil
+		rulesToApply := differenceByPermission(customIngressRules, kubeletRules)
+		return dedupeByPermission(append(kubeletRules, rulesToApply...)), nil
 	case infrav1.SecurityGroupLB:
 		rules := infrav1.IngressRules{}
 		allowedNLBTraffic := false
