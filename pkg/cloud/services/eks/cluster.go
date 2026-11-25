@@ -615,20 +615,32 @@ func (s *Service) reconcileAccessConfig(ctx context.Context, accessConfig *eksty
 	}
 
 	if input.AccessConfig != nil {
+		var updateID string
 		if err := wait.WaitForWithRetryable(wait.NewBackoff(), func() (bool, error) {
-			if _, err := s.EKSClient.UpdateClusterConfig(ctx, input); err != nil {
-				return false, err
+			// Issue the update once; a retry only checks its progress again so the update is not
+			// re-sent after it was accepted.
+			if updateID == "" {
+				out, err := s.EKSClient.UpdateClusterConfig(ctx, input)
+				if err != nil {
+					return false, err
+				}
+				if out != nil && out.Update != nil {
+					updateID = aws.ToString(out.Update.Id)
+				}
 			}
 
-			// Wait until status transitions to UPDATING because there's a short
-			// window after UpdateClusterConfig returns where the cluster
-			// status is ACTIVE and the update would be tried again
-			if err := s.EKSClient.WaitUntilClusterUpdating(
-				ctx,
-				&eks.DescribeClusterInput{Name: aws.String(s.scope.KubernetesClusterName())},
-				s.scope.MaxWaitActiveUpdateDelete,
-			); err != nil {
-				return false, err
+			// An authentication mode change leaves the cluster ACTIVE (or shows UPDATING only
+			// briefly), so wait for the update itself rather than the cluster status. Waiting for
+			// the status made this step block until it timed out, and the access entries, which
+			// are reconciled after it, were held back until then.
+			if updateID != "" {
+				done, err := s.clusterUpdateDone(ctx, updateID)
+				if err != nil {
+					return false, err
+				}
+				if !done {
+					return false, nil
+				}
 			}
 
 			v1beta1conditions.MarkTrue(s.scope.ControlPlane, ekscontrolplanev1.EKSControlPlaneUpdatingCondition)
@@ -641,6 +653,34 @@ func (s *Service) reconcileAccessConfig(ctx context.Context, accessConfig *eksty
 	}
 
 	return nil
+}
+
+// clusterUpdateDone reports whether the given EKS cluster update finished successfully. It returns an
+// error when the update failed or was cancelled.
+func (s *Service) clusterUpdateDone(ctx context.Context, updateID string) (bool, error) {
+	out, err := s.EKSClient.DescribeUpdate(ctx, &eks.DescribeUpdateInput{
+		Name:     aws.String(s.scope.KubernetesClusterName()),
+		UpdateId: aws.String(updateID),
+	})
+	if err != nil {
+		return false, err
+	}
+	if out == nil || out.Update == nil {
+		return false, nil
+	}
+
+	switch out.Update.Status {
+	case ekstypes.UpdateStatusSuccessful:
+		return true, nil
+	case ekstypes.UpdateStatusFailed, ekstypes.UpdateStatusCancelled:
+		reason := ""
+		if len(out.Update.Errors) > 0 {
+			reason = aws.ToString(out.Update.Errors[0].ErrorMessage)
+		}
+		return false, errors.Errorf("EKS cluster update %s %s: %s", updateID, out.Update.Status, reason)
+	default:
+		return false, nil
+	}
 }
 
 func (s *Service) reconcileLogging(ctx context.Context, logging *ekstypes.Logging) error {
