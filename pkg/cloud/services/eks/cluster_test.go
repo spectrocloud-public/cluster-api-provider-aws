@@ -598,16 +598,108 @@ func TestReconcileAccessConfig(t *testing.T) {
 							},
 						},
 					}, nil)
-				m.WaitUntilClusterUpdating(
-					gomock.Eq(context.TODO()),
-					gomock.AssignableToTypeOf(&eks.DescribeClusterInput{}),
-					gomock.Any(),
-				).Return(nil)
+				m.
+					UpdateClusterConfig(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.UpdateClusterConfigInput{})).
+					Return(&eks.UpdateClusterConfigOutput{Update: &ekstypes.Update{Id: aws.String("update-1")}}, nil)
+				m.
+					DescribeUpdate(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.DescribeUpdateInput{})).
+					Return(&eks.DescribeUpdateOutput{Update: &ekstypes.Update{Id: aws.String("update-1"), Status: ekstypes.UpdateStatusSuccessful}}, nil)
+			},
+			expectError: false,
+		},
+		{
+			name: "upgrade in progress then successful",
+			expect: func(m *mock_eksiface.MockEKSAPIMockRecorder) {
+				m.
+					DescribeCluster(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.DescribeClusterInput{})).
+					Return(&eks.DescribeClusterOutput{
+						Cluster: &ekstypes.Cluster{
+							Name: aws.String("default.cluster"),
+							AccessConfig: &ekstypes.AccessConfigResponse{
+								AuthenticationMode: ekstypes.AuthenticationModeConfigMap,
+							},
+						},
+					}, nil)
+				m.
+					UpdateClusterConfig(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.UpdateClusterConfigInput{})).
+					Return(&eks.UpdateClusterConfigOutput{Update: &ekstypes.Update{Id: aws.String("update-1")}}, nil)
+				m.
+					DescribeUpdate(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.DescribeUpdateInput{})).
+					Return(&eks.DescribeUpdateOutput{Update: &ekstypes.Update{Id: aws.String("update-1"), Status: ekstypes.UpdateStatusInProgress}}, nil).
+					Times(1)
+				m.
+					DescribeUpdate(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.DescribeUpdateInput{})).
+					Return(&eks.DescribeUpdateOutput{Update: &ekstypes.Update{Id: aws.String("update-1"), Status: ekstypes.UpdateStatusSuccessful}}, nil).
+					Times(1)
+			},
+			expectError: false,
+		},
+		{
+			name: "upgrade without an update in the response",
+			expect: func(m *mock_eksiface.MockEKSAPIMockRecorder) {
+				m.
+					DescribeCluster(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.DescribeClusterInput{})).
+					Return(&eks.DescribeClusterOutput{
+						Cluster: &ekstypes.Cluster{
+							Name: aws.String("default.cluster"),
+							AccessConfig: &ekstypes.AccessConfigResponse{
+								AuthenticationMode: ekstypes.AuthenticationModeConfigMap,
+							},
+						},
+					}, nil)
 				m.
 					UpdateClusterConfig(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.UpdateClusterConfigInput{})).
 					Return(&eks.UpdateClusterConfigOutput{}, nil)
 			},
 			expectError: false,
+		},
+		{
+			name: "upgrade failed",
+			expect: func(m *mock_eksiface.MockEKSAPIMockRecorder) {
+				m.
+					DescribeCluster(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.DescribeClusterInput{})).
+					Return(&eks.DescribeClusterOutput{
+						Cluster: &ekstypes.Cluster{
+							Name: aws.String("default.cluster"),
+							AccessConfig: &ekstypes.AccessConfigResponse{
+								AuthenticationMode: ekstypes.AuthenticationModeConfigMap,
+							},
+						},
+					}, nil)
+				m.
+					UpdateClusterConfig(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.UpdateClusterConfigInput{})).
+					Return(&eks.UpdateClusterConfigOutput{Update: &ekstypes.Update{Id: aws.String("update-1")}}, nil)
+				m.
+					DescribeUpdate(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.DescribeUpdateInput{})).
+					Return(&eks.DescribeUpdateOutput{Update: &ekstypes.Update{
+						Id:     aws.String("update-1"),
+						Status: ekstypes.UpdateStatusFailed,
+						Errors: []ekstypes.ErrorDetail{{ErrorMessage: aws.String("invalid mode")}},
+					}}, nil)
+			},
+			expectError: true,
+		},
+		{
+			name: "upgrade cancelled",
+			expect: func(m *mock_eksiface.MockEKSAPIMockRecorder) {
+				m.
+					DescribeCluster(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.DescribeClusterInput{})).
+					Return(&eks.DescribeClusterOutput{
+						Cluster: &ekstypes.Cluster{
+							Name: aws.String("default.cluster"),
+							AccessConfig: &ekstypes.AccessConfigResponse{
+								AuthenticationMode: ekstypes.AuthenticationModeConfigMap,
+							},
+						},
+					}, nil)
+				m.
+					UpdateClusterConfig(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.UpdateClusterConfigInput{})).
+					Return(&eks.UpdateClusterConfigOutput{Update: &ekstypes.Update{Id: aws.String("update-1")}}, nil)
+				m.
+					DescribeUpdate(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.DescribeUpdateInput{})).
+					Return(&eks.DescribeUpdateOutput{Update: &ekstypes.Update{Id: aws.String("update-1"), Status: ekstypes.UpdateStatusCancelled}}, nil)
+			},
+			expectError: true,
 		},
 		{
 			name: "api error",
